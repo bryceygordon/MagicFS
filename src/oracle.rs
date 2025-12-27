@@ -11,7 +11,7 @@ use crate::error::{Result, MagicError};
 use tokio::task::JoinHandle;
 use std::sync::Arc;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use bytemuck;
 use anyhow;
 use std::time::Duration;
@@ -461,15 +461,20 @@ fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -
     // Convert embedding to bytes for sqlite-vec
     let embedding_bytes: Vec<u8> = bytemuck::cast_slice(query_embedding).to_vec();
 
-    let mut stmt = db_conn.prepare(
-        "SELECT fr.file_id, fr.abs_path, 1.0 - (v.embedding <=> :embedding) as score
-         FROM vec_index v
-         JOIN file_registry fr ON v.file_id = fr.file_id
-         ORDER BY v.embedding <=> :embedding
-         LIMIT 10"
-    )?;
+    // Use MATCH clause for vector similarity search with sqlite-vec
+    let query_sql = "
+        SELECT
+            fr.file_id,
+            fr.abs_path,
+            distance as score
+        FROM vec_index v
+        JOIN file_registry fr ON v.file_id = fr.file_id
+        WHERE v.embedding MATCH ?
+        LIMIT 10";
 
-    let results = stmt.query_map(rusqlite::named_params! { ":embedding": &embedding_bytes }, |row| {
+    let mut stmt = db_conn.prepare(query_sql)?;
+
+    let results = stmt.query_map(params![embedding_bytes], |row| {
         let abs_path: String = row.get("abs_path")?;
         let score: f32 = row.get("score")?;
 

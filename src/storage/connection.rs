@@ -7,11 +7,37 @@ use std::sync::{Arc, RwLock};
 use rusqlite::Connection;
 use crate::{GlobalState, SharedState};
 
+/// Register sqlite-vec extension with SQLite
+fn register_sqlite_vec_extension() -> crate::error::Result<()> {
+    unsafe {
+        // Import the sqlite3_vec_init function from sqlite-vec crate
+        // Must use transmute to cast to the correct function pointer type
+        let result = rusqlite::ffi::sqlite3_auto_extension(Some(
+            std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ())
+        ));
+
+        if result != rusqlite::ffi::SQLITE_OK {
+            let err = rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(result),
+                Some("Failed to register sqlite-vec extension".to_string())
+            );
+            return Err(crate::error::MagicError::Database(err));
+        }
+
+        tracing::info!("Successfully registered sqlite-vec extension");
+    }
+
+    Ok(())
+}
+
 /// Initialize the database connection in GlobalState
 ///
 /// This function is called once at startup to create the database and establish
 /// the connection. Future operations will use the initialized connection.
 pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Result<()> {
+    // Register sqlite-vec extension FIRST, before opening any connections
+    register_sqlite_vec_extension()?;
+
     let db_dir = std::path::Path::new(db_path).parent()
         .ok_or_else(|| crate::error::MagicError::InvalidPath("Invalid database path".into()))?;
 
@@ -28,9 +54,6 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     // Enable foreign key constraints
     conn.pragma_update(None, "foreign_keys", ON)?;
 
-    // Allow extension loading (needed for sqlite-vec)
-    conn.pragma_update(None, "enable_load_extension", ON)?;
-
     // Optimize for performance
     conn.pragma_update(None, "synchronous", NORMAL)?;
 
@@ -40,11 +63,6 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
 
     // Initialize tables if needed
     if initialized_db {
-        // Try to load sqlite-vec extension first
-        if let Err(e) = conn.execute_batch("SELECT load_extension('sqlite-vec');") {
-            tracing::warn!("Failed to load sqlite-vec extension: {}", e);
-        }
-
         conn.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS file_registry (
                 file_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +87,7 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
         match conn.execute_batch(r#"
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                 file_id INTEGER PRIMARY KEY,
-                embedding FLOAT[384] NOT NULL
+                embedding float[384]
             )
         "#) {
             Ok(_) => tracing::info!("Created vec_index table successfully"),
@@ -84,7 +102,7 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
         match conn.execute_batch(r#"
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                 file_id INTEGER PRIMARY KEY,
-                embedding FLOAT[384] NOT NULL
+                embedding float[384]
             )
         "#) {
             Ok(_) => tracing::info!("Created/verified vec_index table for existing database"),

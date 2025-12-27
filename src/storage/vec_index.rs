@@ -26,6 +26,14 @@ pub fn insert_embedding(
     // Convert embedding to bytes for sqlite-vec
     let embedding_bytes: Vec<u8> = bytemuck::cast_slice(embedding).to_vec();
 
+    // For sqlite-vec virtual tables, we must DELETE then INSERT (no UPSERT support)
+    // First delete any existing embedding
+    conn_ref.execute(
+        "DELETE FROM vec_index WHERE file_id = ?1",
+        params![file_id]
+    )?;
+
+    // Then insert the new embedding
     conn_ref.execute(
         "INSERT INTO vec_index (file_id, embedding) VALUES (?1, ?2)",
         params![file_id, embedding_bytes]
