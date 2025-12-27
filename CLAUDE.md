@@ -17,10 +17,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Common Git Commands
 ```bash
-# Initialize git (already done)
-git init && git branch -m main
-git remote add origin git@github.com:bryceygordon/MagicFS.git
-
 # Check status
 git status
 
@@ -28,8 +24,8 @@ git status
 git add .
 git add .gitignore
 
-# Commit changes
-git commit -m "Initial commit: MagicFS semantic filesystem"
+# Commit changes (use descriptive messages!)
+git commit -m "Brief description of changes"
 
 # Push to remote
 git push -u origin main
@@ -39,7 +35,74 @@ git pull origin main
 
 # View remotes
 git remote -v
+
+# View commit history
+git log --oneline
+
+# View changes
+git diff
 ```
+
+### 🔄 Regular Git Maintenance
+
+**CRITICAL: Perform these git chores regularly!**
+
+1. **Commit Frequently**
+   - Make small, atomic commits
+   - One feature/fix per commit
+   - Write clear, descriptive commit messages
+   - Example: `"Add FastEmbed model loading"` not `"Update code"`
+
+2. **Sync Daily or Frequently**
+   ```bash
+   # Push your changes regularly (at least daily)
+   git add .
+   git commit -m "Describe your changes"
+   git push origin main
+
+   # Pull remote changes
+   git pull origin main
+   ```
+
+3. **Write Good Commit Messages**
+   - First line: Brief summary (50-72 chars)
+   - Blank line
+   - Body: What changed and why (wrap at 72 chars)
+   - Examples:
+     - ✅ `"Add text extraction for PDF files"`
+     - ✅ `"Fix EAGAIN handling in HollowDrive"`
+     - ❌ `"Fixed stuff"` or `"Update code"`
+
+4. **Review Before Committing**
+   ```bash
+   # Check what you're committing
+   git status
+   git diff
+
+   # Stage selectively (recommended for larger changes)
+   git add -p  # Interactive staging
+   ```
+
+5. **Branch Strategy (if needed later)**
+   ```bash
+   # Create feature branch
+   git checkout -b feature/search-optimization
+
+   # Work on branch
+   git commit -m "Add search result caching"
+
+   # Merge back to main
+   git checkout main
+   git merge feature/search-optimization
+   git branch -d feature/search-optimization
+   git push origin main
+   ```
+
+6. **Keep Remote Updated**
+   - Never leave local changes uncommitted for more than a day
+   - Sync with `git pull` before starting work
+   - Push immediately after completing features/fixes
+   - Use `git status` to track uncommitted changes
 
 ## 🏗️ Architecture: Three-Organ System
 
