@@ -57,3 +57,4 @@ node_modules/
 /*.db
 /*.db-shm
 /*.db-wal.fastembed_cache/
+.fastembed_cache/
