@@ -47,7 +47,9 @@ async fn main() -> Result<()> {
     tracing::info!("✓ Global State initialized");
 
     // ========== INITIALIZE DATABASE ==========
-    let db_path = mountpoint.join(".magicfs").join("index.db");
+    // IMPORTANT: Database must be OUTSIDE the FUSE mount to avoid chicken-and-egg problem
+    // If database is inside mount point, FUSE hides the real filesystem and we can't create it
+    let db_path = PathBuf::from("/tmp").join(".magicfs").join("index.db");
     init_connection(&global_state, db_path.to_str().unwrap())?;
     tracing::info!("✓ Database initialized: {}", db_path.display());
 

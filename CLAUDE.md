@@ -268,12 +268,50 @@ fusermount3 -u /tmp/magicfs
 ### Database Operations
 ```bash
 # Inspect the database (Phase 2+)
-sqlite3 /tmp/magicfs/.magicfs/index.db
+sqlite3 /tmp/.magicfs/index.db
 
 # In sqlite3 shell:
 .tables
 .schema file_registry
 SELECT * FROM file_registry LIMIT 10;
+```
+
+### 🐛 Real-World Testing Findings
+
+**CRITICAL BUGS DISCOVERED DURING TESTING:**
+
+1. **Database Path Bug** ✅ FIXED
+   - **Problem**: Database path was inside FUSE mount (`/tmp/magicfs/.magicfs/index.db`)
+   - **Symptom**: "Function not implemented" when creating `.magicfs` directory
+   - **Root Cause**: FUSE hides filesystem after mount - can't create mount-internal directories
+   - **Fix**: Moved database to `/tmp/.magicfs/index.db` (outside FUSE)
+   - **Code**: `src/main.rs` line 52
+
+2. **vec_index Table Missing** 🔄 PENDING FIX
+   - **Problem**: `connection.rs` only creates `file_registry` and `system_config`
+   - **Missing**: `vec_index` virtual table for sqlite-vec
+   - **Fix Needed**: Add `vec_index` creation with sqlite-vec extension load
+   - **Location**: `src/storage/connection.rs` lines 40-58
+
+3. **File Indexing Pipeline Not Working** 🔄 INVESTIGATING
+   - **Problem**: Files not being indexed automatically
+   - **Symptom**: `file_registry` table has 0 entries after startup
+   - **Status**: Librarian is running, but files not being processed
+   - **Investigation**: Check Librarian → Oracle → vec_index flow
+
+**Testing Commands**:
+```bash
+# Test search (returns EAGAIN until files indexed)
+ls /tmp/magicfs/search/python
+
+# Check database state
+sqlite3 /tmp/.magicfs/index.db "SELECT COUNT(*) FROM file_registry;"
+
+# Verify vec_index exists (currently fails)
+sqlite3 /tmp/.magicfs/index.db "SELECT name FROM sqlite_master WHERE name='vec_index';"
+
+# Check MagicFS processes
+ps aux | grep magicfs
 ```
 
 ### Code Quality
@@ -363,11 +401,39 @@ Every FUSE operation must return in <10ms:
 
 ## 🧪 Testing
 
-Current state: All 5 phases complete! Full semantic filesystem operational
-- End-to-end testing: Mount filesystem and navigate to /search/[query]
-- File watching: Create/modify/delete files and verify index updates
-- Each organ is independently testable
-- Integration tests can verify the three-organ coordination (Phase 1-5 complete)
+### Current Testing Status
+
+**Real-world testing completed on 2025-12-27:**
+- ✅ FUSE filesystem mounts successfully
+- ✅ Three-organ architecture operational (HollowDrive, Oracle, Librarian)
+- ✅ FastEmbed model loads (BAAI/bge-small-en-v1.5, 384 dimensions)
+- ✅ Database created at `/tmp/.magicfs/index.db` (WAL mode)
+- ✅ HollowDrive correctly implements EAGAIN (10ms law respected)
+- 🔄 2/3 critical bugs fixed, 1 pending investigation
+
+**Known Issues**:
+1. ❌ `vec_index` table not created (see Real-World Testing Findings)
+2. ❌ File indexing pipeline not working (0 files in file_registry)
+
+**Test Commands**:
+```bash
+# Build project
+cargo build
+
+# Mount and run (requires sudo)
+sudo RUST_LOG=debug cargo run -- /tmp/magicfs /tmp/magicfs-test-files
+
+# Test search (after file indexing works)
+ls /tmp/magicfs/search/python
+
+# Check database state
+sqlite3 /tmp/.magicfs/index.db "SELECT COUNT(*) FROM file_registry;"
+
+# Verify vec_index exists (currently fails)
+sqlite3 /tmp/.magicfs/index.db "SELECT name FROM sqlite_master WHERE name='vec_index';"
+```
+
+**See `SESSION_HANDOFF_2025-12-27.md` for complete bug analysis and next steps.**
 
 ## 🚀 Current Status
 
