@@ -287,12 +287,16 @@ SELECT * FROM file_registry LIMIT 10;
    - **Fix**: Moved database to `/tmp/.magicfs/index.db` (outside FUSE)
    - **Code**: `src/main.rs` line 52
 
-2. **vec_index Table Missing** ✅ FIXED (Partial)
+2. **vec_index Table Missing** ✅ FIXED
    - **Problem**: `connection.rs` only creates `file_registry` and `system_config`
-   - **Status**: vec_index creation code added for both new and existing databases
-   - **Issue**: sqlite-vec extension fails to load ("not authorized", "no such module: vec0")
-   - **Impact**: Files are indexed but embeddings cannot be stored
-   - **Code**: `src/storage/connection.rs` lines 75-93
+   - **Issue 1**: sqlite-vec extension fails to load ("not authorized", "no such module: vec0")
+   - **Fix 1**: Use `sqlite3_auto_extension()` instead of `execute_batch("SELECT load_extension()")`
+   - **Issue 2**: vec0 table creation fails with "could not parse vector column"
+   - **Fix 2**: Remove `NOT NULL` constraint from embedding column (vec0 doesn't support it)
+   - **Issue 3**: Virtual tables don't support UPSERT/UPDATE operations like regular tables
+   - **Fix 3**: Use DELETE then INSERT pattern (no INSERT OR REPLACE support)
+   - **Code**: `src/storage/connection.rs`, `src/storage/vec_index.rs`
+   - **Status**: vec_index table now creates successfully, embeddings stored correctly
 
 3. **File Indexing Pipeline Not Working** ✅ FIXED
    - **Problem**: Files not being indexed automatically
@@ -306,22 +310,30 @@ SELECT * FROM file_registry LIMIT 10;
    - **Solution**: Oracle now waits for model readiness before processing files
    - **Code**: `src/oracle.rs` lines 62-80 (model readiness check)
 
+5. **Semantic Search Query Error** ✅ FIXED
+   - **Problem**: Search query uses `<=>` operator which doesn't exist in sqlite-vec
+   - **Symptom**: "syntax error: near '>'" when processing searches
+   - **Fix**: Use MATCH clause instead: `WHERE v.embedding MATCH ?`
+   - **Query**: Removed ORDER BY with `<=>`, now relies on MATCH's built-in ranking
+   - **Code**: `src/oracle.rs` perform_sqlite_vector_search function
+
 **Testing Commands**:
 ```bash
-# Test search (returns EAGAIN until files indexed)
+# Clean start (recommended)
+rm -rf /tmp/.magicfs
+sudo RUST_LOG=debug cargo run /tmp/magicfs /tmp/magicfs-test-files
+
+# Wait 10 seconds for indexing, then test search
 ls /tmp/magicfs/search/python
 
-# Check database state - should show 6 files indexed
+# Check database - should show 8 files
 sqlite3 /tmp/.magicfs/index.db "SELECT COUNT(*) FROM file_registry;"
 
-# Verify vec_index exists (may show warning about extension)
-sqlite3 /tmp/.magicfs/index.db "SELECT name FROM sqlite_master WHERE name='vec_index';"
+# Verify vec_index has embeddings (requires extension loaded in MagicFS)
+# Check logs for: "Inserted embedding for file_id: X"
 
-# Check MagicFS processes
-ps aux | grep magicfs
-
-# See files being indexed (with debug logging)
-sudo RUST_LOG=debug cargo run /tmp/magicfs /path/to/watch
+# See full indexing process
+tail -f /tmp/magicfs.log | grep -E "(vec_index|embedding|search)"
 ```
 
 ### Code Quality
