@@ -28,6 +28,9 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     // Enable foreign key constraints
     conn.pragma_update(None, "foreign_keys", ON)?;
 
+    // Allow extension loading (needed for sqlite-vec)
+    conn.pragma_update(None, "enable_load_extension", ON)?;
+
     // Optimize for performance
     conn.pragma_update(None, "synchronous", NORMAL)?;
 
@@ -37,6 +40,11 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
 
     // Initialize tables if needed
     if initialized_db {
+        // Try to load sqlite-vec extension first
+        if let Err(e) = conn.execute_batch("SELECT load_extension('sqlite-vec');") {
+            tracing::warn!("Failed to load sqlite-vec extension: {}", e);
+        }
+
         conn.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS file_registry (
                 file_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,9 +64,32 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         "#)?;
+
+        // Try to create vec_index table
+        match conn.execute_batch(r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
+                file_id INTEGER PRIMARY KEY,
+                embedding FLOAT[384] NOT NULL
+            )
+        "#) {
+            Ok(_) => tracing::info!("Created vec_index table successfully"),
+            Err(e) => tracing::warn!("Failed to create vec_index table: {}", e),
+        }
+
         tracing::info!("Initialized new database with all tables");
     } else {
         tracing::info!("Loaded existing database");
+
+        // Also try to create vec_index table for existing databases that might not have it
+        match conn.execute_batch(r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
+                file_id INTEGER PRIMARY KEY,
+                embedding FLOAT[384] NOT NULL
+            )
+        "#) {
+            Ok(_) => tracing::info!("Created/verified vec_index table for existing database"),
+            Err(e) => tracing::warn!("vec_index table not available (sqlite-vec extension required): {}", e),
+        }
     }
 
     // Store connection in state (wrap in Arc<Mutex<Option<Connection>>>)

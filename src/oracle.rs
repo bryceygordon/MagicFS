@@ -59,6 +59,26 @@ impl Oracle {
     async fn run_task(state: SharedState) {
         tracing::info!("[Oracle] Async task started");
 
+        // Wait for embedding model to initialize before processing anything
+        tracing::info!("[Oracle] Waiting for embedding model to initialize...");
+        let mut model_ready = false;
+        for _ in 0..100 { // Wait up to 10 seconds
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
+            let model_lock = state_guard.embedding_model.lock().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
+            if model_lock.is_some() {
+                model_ready = true;
+                break;
+            }
+        }
+
+        if !model_ready {
+            tracing::warn!("[Oracle] Embedding model not ready after 10 seconds, continuing anyway");
+        } else {
+            tracing::info!("[Oracle] Embedding model ready, proceeding with indexing");
+        }
+
         // Phase 4: Monitor active_searches for new queries
         // Phase 5: Monitor files_to_index for new files to index
 
@@ -90,11 +110,22 @@ impl Oracle {
             // Phase 5: Check for new files to index
             let files_to_process: Vec<String> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
-                let files_to_process: Vec<String> = files_to_index_lock.drain(..)
-                    .filter(|file| !processed_files.contains(file))
-                    .collect();
-                files_to_process
+
+                // Check if model is ready before processing files
+                let model_lock = state_guard.embedding_model.lock().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
+                let model_ready = model_lock.is_some();
+                drop(model_lock);
+
+                if !model_ready {
+                    tracing::debug!("[Oracle] Model not ready, skipping file indexing for this iteration");
+                    Vec::new()
+                } else {
+                    let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
+                    let files_to_process: Vec<String> = files_to_index_lock.drain(..)
+                        .filter(|file| !processed_files.contains(file))
+                        .collect();
+                    files_to_process
+                }
             };
 
             // Process any new queries
@@ -335,8 +366,11 @@ impl Oracle {
             (file_id, inode)
         };
 
-        // Step 4: Insert embedding into vec_index
-        crate::storage::insert_embedding(&state, file_id, &embedding)?;
+        // Step 4: Insert embedding into vec_index (gracefully handle missing table)
+        match crate::storage::insert_embedding(&state, file_id, &embedding) {
+            Ok(_) => tracing::debug!("Inserted embedding for file_id: {}", file_id),
+            Err(e) => tracing::warn!("Failed to store embedding (vec_index may not be available): {}. File still registered.", e),
+        }
 
         // Step 8: Invalidate caches
         Oracle::invalidate_caches_after_index(state.clone(), file_path.clone())?;

@@ -65,6 +65,27 @@ impl Librarian {
     fn watcher_loop(watch_paths: Arc<Mutex<Vec<String>>>, state: SharedState) {
         tracing::info!("[Librarian] Watcher loop started");
 
+        // Perform initial scan of existing files before setting up watcher
+        // This ensures files that already exist are indexed
+        {
+            let paths = match watch_paths.lock() {
+                Ok(guard) => guard.clone(),
+                Err(_) => {
+                    tracing::error!("[Librarian] Failed to lock watch_paths");
+                    Vec::new()
+                }
+            };
+
+            tracing::info!("[Librarian] Starting initial file scan...");
+            for path in paths {
+                if let Err(e) = Self::scan_directory_for_files(&state, std::path::Path::new(&path)) {
+                    tracing::error!("[Librarian] Error scanning directory {}: {}", path, e);
+                } else {
+                    tracing::info!("[Librarian] Initial scan complete for: {}", path);
+                }
+            }
+        }
+
         // Phase 5 Step 1: Initialize notify watcher
         let (tx, rx) = mpsc::channel();
 
@@ -136,6 +157,51 @@ impl Librarian {
                 }
             }
         }
+    }
+
+    /// Recursively scan directory for existing files to index
+    fn scan_directory_for_files(state: &SharedState, dir_path: &std::path::Path) -> Result<()> {
+        tracing::info!("[Librarian] Scanning directory: {}", dir_path.display());
+
+        if !dir_path.exists() {
+            tracing::warn!("[Librarian] Directory does not exist: {}", dir_path.display());
+            return Ok(());
+        }
+
+        if !dir_path.is_dir() {
+            tracing::warn!("[Librarian] Path is not a directory: {}", dir_path.display());
+            return Ok(());
+        }
+
+        // Recursively walk the directory
+        for entry in walkdir::WalkDir::new(dir_path) {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let path_str = path.to_string_lossy().to_string();
+                        tracing::debug!("[Librarian] Found file to index: {}", path_str);
+
+                        // Add to indexing queue (same as event handling)
+                        let files_to_index = {
+                            let state_guard = state.read()
+                                .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
+                            Arc::clone(&state_guard.files_to_index)
+                        };
+
+                        let mut queue = files_to_index.lock()
+                            .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
+                        queue.push(path_str);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[Librarian] Error walking directory: {}", e);
+                }
+            }
+        }
+
+        tracing::info!("[Librarian] Directory scan complete: {}", dir_path.display());
+        Ok(())
     }
 
     /// Handle a file system event
