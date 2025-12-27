@@ -56,4 +56,4 @@ node_modules/
 # SQLite database files (should be created per mount)
 /*.db
 /*.db-shm
-/*.db-wal
+/*.db-wal.fastembed_cache/
