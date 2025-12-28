@@ -17,7 +17,7 @@ pub struct GlobalState {
     /// Database connection (created lazily)
     pub db_connection: Arc<std::sync::Mutex<Option<rusqlite::Connection>>>,
 
-    /// Embedding model for Oracle
+    /// Embedding model for Oracle (initialized lazily, Arc allows sharing, Mutex serializes access to prevent segfaults)
     pub embedding_model: Arc<std::sync::Mutex<Option<fastembed::TextEmbedding>>>,
 
     /// Queue of file paths waiting for indexing (added by Librarian, processed by Oracle)
@@ -42,7 +42,7 @@ impl Default for GlobalState {
             active_searches: Arc::new(DashMap::new()),
             search_results: Arc::new(DashMap::new()),
             db_connection: Arc::new(std::sync::Mutex::new(None)),
-            embedding_model: Arc::new(std::sync::Mutex::new(None)),
+            embedding_model: Arc::new(unsafe { std::mem::zeroed() }), // Placeholder, must be replaced
             files_to_index: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }

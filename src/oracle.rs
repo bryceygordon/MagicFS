@@ -66,8 +66,8 @@ impl Oracle {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-            let model_lock = state_guard.embedding_model.lock().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-            if model_lock.is_some() {
+            // Check if the placeholder has been replaced by trying to read the Mutex
+            if state_guard.embedding_model.try_lock().is_ok() {
                 model_ready = true;
                 break;
             }
@@ -111,14 +111,11 @@ impl Oracle {
             let files_to_process: Vec<String> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
 
-                // Check if model is ready before processing files
-                let model_lock = state_guard.embedding_model.lock().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                let model_ready = model_lock.is_some();
+                // Check if model is ready (has been initialized)
+                let model_ready = state_guard.embedding_model.lock().map(|g| g.is_some()).unwrap_or(false);
                 if !model_ready {
-                    tracing::warn!("[Oracle] Model not ready (model is None), skipping file indexing");
-                    tracing::warn!("[Oracle] This indicates the model was removed from state - check for .take() calls!");
+                    tracing::warn!("[Oracle] Model not ready (placeholder not replaced), skipping file indexing");
                 }
-                drop(model_lock);
 
                 if !model_ready {
                     tracing::debug!("[Oracle] Model not ready, skipping file indexing for this iteration");
@@ -188,14 +185,15 @@ impl Oracle {
                 Ok(model) => {
                     tracing::info!("[Oracle] Embedding model loaded successfully");
 
-                    // Store model in global state
-                    let mut model_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                    *model_guard.embedding_model.lock().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap() = Some(model);
+                    // Store model in global state (replace the placeholder)
+                    let mut state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
+                    *state_guard.embedding_model.lock().unwrap() = Some(model);
 
                     tracing::info!("[Oracle] Embedding model initialization complete");
                 }
                 Err(e) => {
                     tracing::error!("[Oracle] Failed to initialize model: {}", e);
+                    // TODO: Handle initialization failure properly
                 }
             }
         });
@@ -254,18 +252,16 @@ impl Oracle {
 
         // Generate embedding for query in a blocking task
         let query_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
+            // Use std::sync::Mutex which has synchronous lock() for spawn_blocking
             let state_guard = state_for_embedding.read()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let mut model_lock = state_guard.embedding_model.lock()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let model_opt = model_lock.take()
+            let model_ref = model_lock.as_mut()
                 .ok_or_else(|| MagicError::Embedding("Model not initialized".into()))?;
-
-            let mut model = model_opt;
-            let embedding_vec = model.embed(vec![query_clone.as_str()], None)
-                .map_err(|e| MagicError::Embedding(format!("Failed to embed query: {}", e)))?;
-
-            Ok::<Vec<f32>, MagicError>(embedding_vec[0].clone())
+            model_ref.embed(vec![query_clone.as_str()], None)
+                .map(|mut res| res.remove(0))
+                .map_err(|e| MagicError::Embedding(format!("Failed to embed query: {}", e)))
         }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Embed task panic")))??;
 
         tracing::debug!("[Oracle] Generated embedding for query: {} ({} dims)", query, query_embedding.len());
@@ -299,19 +295,15 @@ impl Oracle {
 
         // Use spawn_blocking for embedding generation
         let handle = self.runtime.spawn_blocking(move || {
+            // Use std::sync::Mutex which has synchronous lock() for spawn_blocking
             let state_guard = state.read()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let mut model_lock = state_guard.embedding_model.lock()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let model_opt = model_lock.take()
+            let model_ref = model_lock.as_mut()
                 .ok_or_else(|| MagicError::Embedding("Model not initialized".into()))?;
-
-            let mut model = model_opt;
-            let embedding_vec = model.embed(vec![content_owned.as_str()], None)
+            let embedding_vec = model_ref.embed(vec![content_owned.as_str()], None)
                 .map_err(|e| MagicError::Embedding(format!("Failed to embed content: {}", e)))?;
-
-            // Put the model back
-            *model_lock = Some(model);
 
             Ok::<Vec<f32>, MagicError>(embedding_vec[0].clone())
         });
@@ -440,21 +432,16 @@ impl Oracle {
 
         // Generate embedding in a blocking task
         let query_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
+            // Use std::sync::Mutex which has synchronous lock() for spawn_blocking
             let state_guard = state_for_embedding.read()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let mut model_lock = state_guard.embedding_model.lock()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let model_opt = model_lock.take()
+            let model_ref = model_lock.as_mut()
                 .ok_or_else(|| MagicError::Embedding("Model not initialized".into()))?;
-
-            let mut model = model_opt;
-            let embedding_vec = model.embed(vec![content.as_str()], None)
-                .map_err(|e| MagicError::Embedding(format!("Failed to embed content: {}", e)))?;
-
-            // Put the model back
-            *model_lock = Some(model);
-
-            Ok::<Vec<f32>, MagicError>(embedding_vec[0].clone())
+            model_ref.embed(vec![content.as_str()], None)
+                .map(|mut res| res.remove(0))
+                .map_err(|e| MagicError::Embedding(format!("Failed to embed content: {}", e)))
         }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Embed task panic")))??;
 
         Ok(query_embedding)
