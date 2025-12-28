@@ -57,10 +57,12 @@ impl IgnoreManager {
         }
         
         // Check if any component of the path matches a rule
+        // This handles "secrets" matching "/path/to/secrets/file.txt"
         for component in path.components() {
             let comp_str = component.as_os_str().to_string_lossy();
             for rule in &self.rules {
                 if comp_str == *rule {
+                    // Log at INFO level so it appears in standard run logs
                     tracing::info!("[Librarian] IGNORED '{}' because it matches rule '{}'", path.display(), rule);
                     return true;
                 }
@@ -112,7 +114,6 @@ impl Librarian {
     pub fn add_watch_path(&self, path: String) -> Result<()> {
         let mut paths = self.watch_paths.lock().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
         
-        // FIX: Clone the path here so we can still use it for logging below
         paths.push(path.clone());
         
         tracing::info!("[Librarian] Added watch path: {}", path);
@@ -214,6 +215,8 @@ impl Librarian {
 
         // Use filter_entry to prevent descending into ignored directories
         let walker = walkdir::WalkDir::new(dir_path).into_iter();
+        
+        // This efficiently stops walkdir from entering ignored directories (like secrets/)
         let filtered_walker = walker.filter_entry(|e| !ignore_manager.is_ignored(e.path()));
 
         for entry in filtered_walker {

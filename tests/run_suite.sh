@@ -84,10 +84,6 @@ echo ".git" > "$WATCH_DIR/.magicfsignore"
 echo ".obsidian" >> "$WATCH_DIR/.magicfsignore"
 echo "secrets" >> "$WATCH_DIR/.magicfsignore" # <--- The new rule
 
-# -- Create .magicfsignore --
-echo ".git" > "$WATCH_DIR/.magicfsignore"
-echo ".obsidian" >> "$WATCH_DIR/.magicfsignore"
-
 # 4. Launch MagicFS
 echo -e "${GREEN}Launching MagicFS... (Logs -> $LOG_FILE)${NC}"
 sudo RUST_LOG=info $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
