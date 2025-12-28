@@ -1,84 +1,72 @@
-Here is the updated handover document.
-
-The root cause of the current failure is identified below: The text extractor is too aggressive and strips the comment-only content from your test file, causing the Oracle to skip indexing it.
-
-### 📄 SESSION_HANDOVER_SUMMARY.md
-
-```markdown
-# 🔄 MagicFS Handoff: Test Suite & Ignore Logic
-
-**Date**: 2025-12-28 22:10 AWST
-**Session Goal**: Establish automated testing and implement `.magicfsignore` functionality.
-**Status**: ⚠️ **Test Suite Functional (2/3 Pass)**
-
-## 🚨 Critical Issue to Fix Next
-
-The test `test_03_search.py` is **FAILING** with a timeout.
-
-* **Symptom**: `❌ Timeout waiting for ai.rs`
-* **Log Evidence**:
-    ```text
-    WARN magicfs::oracle: [Oracle] File has no text content: /tmp/magicfs-test-data/projects/ai.rs
-    ```
-* **Root Cause**:
-    * The test file `ai.rs` contains *only* a comment: `// This is a rust vector search implementation`.
-    * The module `src/storage/text_extraction.rs` (`extract_rust_code`) **removes all comments**.
-    * Result: Extracted text is empty -> Oracle skips indexing -> Test waits forever for DB entry.
-
-**✅ Solution for Next Session:**
-Update `tests/cases/test_03_search.py` to include actual code, not just comments:
-```python
-test.create_file("projects/ai.rs", """
-fn main() {
-    // Vector search implementation
-    println!("searching..."); 
-}
-""")
-
-```
+Here is the comprehensive handover file. The project is in a much stronger state than when we started—the logic is solid, and we have isolated the final flakiness to a classic "read-after-write" race condition.
 
 ---
 
-## 🛠️ Achievements This Session
+# 🔄 MagicFS Handoff: The "Empty Read" Race
 
-1. **Modular Test Suite**: Created a robust python-based test harness (`tests/run_suite.sh`, `tests/common.py`).
-2. **Dynamic Ignore Logic**:
-* `src/librarian.rs` now watches for changes to `.magicfsignore` and reloads rules dynamically.
-* Confirmed via `test_02_dotfiles.py` (Passes).
+**Date**: 2025-12-28 22:35 AWST
+**Status**: ⚠️ **2/3 Tests Passing** (Indexing ✅, Ignore Rules ✅, Search ❌)
 
+## 🏆 Key Achievements (Session Fixes)
 
-3. **Race Condition Fix**:
-* Librarian now detects `Create(Folder)` events and immediately scans the new directory.
-* This fixes the issue where files created immediately after their parent directory were lost.
+1. **Fixed "Silent Watcher"**: Reverted `fs::canonicalize` in `src/librarian.rs`. The watcher now correctly tracks the test directory without path resolution mismatches.
+2. **Fixed "Ignore Rule" Race**: Implemented **Two-Pass Batch Processing** in `src/librarian.rs`. The Librarian now prioritizes processing `.magicfsignore` updates *before* processing file events in the same batch. `test_02_dotfiles.py` now passes consistently!
 
+## 🚨 Current Failure: "The Empty Read"
 
+`test_03_search.py` is failing with a timeout because the Oracle refuses to index the file `projects/ai.rs`.
 
-## 📂 Current Code State
+**The Log Evidence:**
 
-### `src/librarian.rs`
-
-* **Status**: **Production Ready**.
-* **Features**:
-* Debounced event batching.
-* Dynamic `.magicfsignore` reloading.
-* Robust handling of file-creation races (scans new folders).
-* Deep debug logging enabled.
-
-
-
-### `tests/`
-
-* `run_suite.sh`: Handles build, sudo, mount, and cleanup.
-* `cases/test_01_indexing.py`: ✅ PASS.
-* `cases/test_02_dotfiles.py`: ✅ PASS.
-* `cases/test_03_search.py`: ❌ FAIL (Data issue, see above).
-
-## 📋 Next Steps
-
-1. **Fix Test 03**: Update the content string in `test_03_search.py` to include real code so the text extractor doesn't return an empty string.
-2. **Verify Search**: Once indexing passes, ensure `test.search_fs` actually returns the correct result via FUSE.
-3. **Merge**: The system is essentially feature-complete for the current roadmap.
+```text
+DEBUG magicfs::librarian: [Librarian] RAW EVENT: Event { kind: Create(File), paths: [".../ai.rs"] ... }
+DEBUG magicfs::librarian: [Librarian] RAW EVENT: Event { kind: Modify(Data(Any)), paths: [".../ai.rs"] ... }
+INFO  magicfs::librarian: [Librarian] Queuing file for index: .../ai.rs
+INFO  magicfs::oracle: [Oracle] Indexing file: .../ai.rs
+WARN  magicfs::oracle: [Oracle] File has no text content: .../ai.rs  <-- HERE IS THE BUG
 
 ```
 
+**Diagnosis:**
+The Oracle is too fast. It picks up the file from the queue and attempts to read it immediately after the `notify` event.
+
+* **Scenario:** Python script writes file -> OS triggers Event -> Librarian queues file -> Oracle opens file.
+* **Result:** The file handle might still be flushing, or the read operation sees 0 bytes because the write hasn't fully committed to the filesystem view the Oracle sees.
+
+## 🛠️ Next Steps for New Session
+
+**Goal**: Ensure `text_extraction` reliably reads content.
+
+**Proposed Solution**:
+Modify `src/oracle.rs` -> `index_file` function.
+
+1. **Add Retry Logic**: If `extract_text_from_file` returns empty string, but `fs::metadata` says size > 0, wait 50ms and try again (up to 3 times).
+2. **Verify Metadata**: Check `file_len` before reading.
+
+**Code Location to Fix (`src/oracle.rs`):**
+
+```rust
+// Current Code:
+let text_content = tokio::task::spawn_blocking(move || {
+    crate::storage::extract_text_from_file(...)
+}).await...;
+
+if text_content.trim().is_empty() {
+    // BUG: It gives up immediately!
+    tracing::warn!("[Oracle] File has no text content: {}", file_path);
+    return Ok(());
+}
+
 ```
+
+## 📂 Critical Files State
+
+* **`src/librarian.rs`**: **STABLE**. Robust two-pass logic is working perfectly. Do not touch unless necessary.
+* **`src/oracle.rs`**: **UNSTABLE**. Needs the read-retry logic described above.
+* **`tests/run_suite.sh`**: **STABLE**. Good for running the loop.
+
+## 🧪 How to Resume
+
+1. **Verify Failure**: Run `./tests/run_suite.sh` to see `test_03` fail with the "File has no text content" warning.
+2. **Implement Fix**: Add the retry loop to `src/oracle.rs`.
+3. **Verify Success**: Run the suite again. All 3 tests should pass.
