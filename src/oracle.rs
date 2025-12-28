@@ -1,4 +1,10 @@
-// src/oracle.rs
+//! Oracle: The Async Brain
+//!
+//! Handles Vector Search (fastembed-rs) and SQLite (sqlite-vec).
+//! Populates the Memory Cache for the Hollow Drive.
+//!
+//! CRITICAL RULE: Runs on Tokio async runtime + blocking compute threads.
+//! Never blocks the FUSE loop.
 
 use crate::state::{SharedState, SearchResult, EmbeddingRequest};
 use crate::error::{Result, MagicError};
@@ -59,7 +65,8 @@ impl Oracle {
 
         // Store the sender in global state
         {
-            let mut state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            // FIX: Removed unnecessary 'mut'
+            let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             *state_guard.embedding_tx.write().unwrap() = Some(tx);
         }
 
@@ -71,7 +78,8 @@ impl Oracle {
             // Initialize model on this thread
             let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15));
             
-            let model = match model_result {
+            // FIX: Added 'mut' because embed() requires mutable access
+            let mut model = match model_result {
                 Ok(m) => {
                     tracing::info!("[EmbeddingActor] Model loaded successfully");
                     m
@@ -200,12 +208,13 @@ impl Oracle {
 
         let results = Oracle::perform_vector_search(state.clone(), query.clone()).await?;
 
+        // FIX: Lifetime issue resolved by extracting value immediately
         let inode_num = {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            match state_guard.active_searches.get(&query) {
-                Some(entry) => *entry.value(),
-                None => return Err(MagicError::State("Query not found".into())),
-            }
+            // .map(|v| *v.value()) copies the u64 out, allowing the Ref (and guard) to drop cleanly
+            state_guard.active_searches.get(&query)
+                .map(|v| *v.value())
+                .ok_or_else(|| MagicError::State("Query not found".into()))?
         };
 
         {
