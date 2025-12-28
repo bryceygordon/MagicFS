@@ -38,6 +38,13 @@ impl Librarian {
         }
     }
 
+    /// Check if a path should be ignored (dotfiles, hidden directories)
+    fn is_ignored_path(path: &std::path::Path) -> bool {
+        path.components().any(|component| {
+            component.as_os_str().to_string_lossy().starts_with('.')
+        })
+    }
+
     /// Start the watcher thread
     pub fn start(&mut self) -> Result<()> {
         let watch_paths = Arc::clone(&self.watch_paths);
@@ -173,11 +180,24 @@ impl Librarian {
             return Ok(());
         }
 
-        // Recursively walk the directory
+        // Recursively walk the directory, skipping hidden files and directories
         for entry in walkdir::WalkDir::new(dir_path) {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
+
+                    // Skip directory entries that start with '.' to prevent descending into them
+                    if entry.file_type().is_dir() && entry.file_name().to_string_lossy().starts_with('.') {
+                        tracing::debug!("[Librarian] Skipping hidden directory: {}", path.display());
+                        continue;
+                    }
+
+                    // Skip hidden files and directories (e.g., .obsidian, .git, .DS_Store)
+                    if entry.file_name().to_string_lossy().starts_with('.') || Self::is_ignored_path(path) {
+                        tracing::debug!("[Librarian] Skipping hidden file: {}", path.display());
+                        continue;
+                    }
+
                     if path.is_file() {
                         let path_str = path.to_string_lossy().to_string();
                         tracing::debug!("[Librarian] Found file to index: {}", path_str);
@@ -217,6 +237,12 @@ impl Librarian {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         for path in &event.paths {
+                            // Skip hidden files and directories (e.g., .obsidian, .git, .DS_Store)
+                            if Self::is_ignored_path(path) {
+                                tracing::debug!("[Librarian] Ignoring hidden file event: {:?}", path);
+                                continue;
+                            }
+
                             if path.is_file() {
                                 let path_str = path.to_string_lossy().to_string();
                                 tracing::info!("[Librarian] Queuing file for indexing: {}", path_str);
