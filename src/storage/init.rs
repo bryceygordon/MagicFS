@@ -49,7 +49,7 @@ fn create_file_registry_table(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS file_registry (
             file_id INTEGER PRIMARY KEY AUTOINCREMENT,
             abs_path TEXT NOT NULL UNIQUE,
-            inode INTEGER NOT NULL UNIQUE,
+            inode INTEGER NOT NULL,
             mtime INTEGER NOT NULL,
             size INTEGER NOT NULL DEFAULT 0,
             is_dir INTEGER NOT NULL DEFAULT 0,

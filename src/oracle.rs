@@ -114,6 +114,10 @@ impl Oracle {
                 // Check if model is ready before processing files
                 let model_lock = state_guard.embedding_model.lock().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let model_ready = model_lock.is_some();
+                if !model_ready {
+                    tracing::warn!("[Oracle] Model not ready (model is None), skipping file indexing");
+                    tracing::warn!("[Oracle] This indicates the model was removed from state - check for .take() calls!");
+                }
                 drop(model_lock);
 
                 if !model_ready {

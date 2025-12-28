@@ -175,11 +175,16 @@ impl Filesystem for HollowDrive {
                     let state_for_oracle = Arc::clone(&self.state);
 
                     tokio::spawn(async move {
-                        // Import Oracle here to avoid circular dependency
-                        use crate::oracle::Oracle;
-                        // We can't call Oracle methods directly from here, so we'll just
-                        // trigger it via state. The Oracle is already watching active_searches.
-                        let _ = query_for_oracle; // Keep the query in scope
+                        // Hash the query to create a consistent inode for this search
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        query_for_oracle.hash(&mut hasher);
+                        let search_inode = hasher.finish() as u64 | 0x8000000000000000; // Mark as dynamic inode
+
+                        // Add the search query to active_searches so Oracle can pick it up
+                        let mut state_guard = state_for_oracle.write().unwrap();
+                        state_guard.active_searches.insert(query_for_oracle.clone(), search_inode);
                     });
 
                     reply.error(libc::EAGAIN); // Signal that results aren't ready yet

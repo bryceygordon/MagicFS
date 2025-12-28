@@ -67,7 +67,7 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
             CREATE TABLE IF NOT EXISTS file_registry (
                 file_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 abs_path TEXT NOT NULL UNIQUE,
-                inode INTEGER NOT NULL UNIQUE,
+                inode INTEGER NOT NULL,
                 mtime INTEGER NOT NULL,
                 size INTEGER NOT NULL DEFAULT 0,
                 is_dir INTEGER NOT NULL DEFAULT 0,
@@ -97,6 +97,43 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
         tracing::info!("Initialized new database with all tables");
     } else {
         tracing::info!("Loaded existing database");
+
+        // Migration: Remove UNIQUE constraint from inode column if it exists
+        // Check if the constraint exists
+        let has_inode_unique = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='file_registry' AND sql LIKE '%inode%UNIQUE%'",
+            [],
+            |row| row.get::<_, i32>(0)
+        ).unwrap_or(0) > 0;
+
+        if has_inode_unique {
+            tracing::info!("Migrating database: Removing UNIQUE constraint from inode column");
+            conn.execute_batch(r#"
+                -- Create new table without UNIQUE constraint on inode
+                CREATE TABLE file_registry_new (
+                    file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    abs_path TEXT NOT NULL UNIQUE,
+                    inode INTEGER NOT NULL,
+                    mtime INTEGER NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    is_dir INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+
+                -- Copy data from old table
+                INSERT INTO file_registry_new
+                SELECT file_id, abs_path, inode, mtime, size, is_dir, created_at, updated_at
+                FROM file_registry;
+
+                -- Drop old table
+                DROP TABLE file_registry;
+
+                -- Rename new table
+                ALTER TABLE file_registry_new RENAME TO file_registry;
+            "#)?;
+            tracing::info!("Database migration complete: Removed UNIQUE constraint from inode");
+        }
 
         // Also try to create vec_index table for existing databases that might not have it
         match conn.execute_batch(r#"
