@@ -335,3 +335,19 @@ A fully functional semantic filesystem where:
 ---
 
 **END OF HANDOFF - Two bugs down, one to go! 🎯**
+---
+
+## 📚 Additional Session (2025-12-28 13:45 UTC)
+**See**: `SESSION_HANDOFF_2025-12-28_FASTEMBED_SEGFAULT.md` for critical segfault investigation
+
+**New Finding**: Model persistence fix revealed deeper issue - **SEGMENTATION FAULT**
+- Root cause: FastEmbed model can't handle concurrent spawn_blocking tasks
+- Multiple threads calling embed() simultaneously = race condition
+- std::sync::Mutex serialization doesn't help (underlying FFI issue)
+
+**Status Updated**: MagicFS is 60% functional - CRITICAL SEGFAULT blocks all file indexing
+**Solution**: Need actor model, batch processing, or async embedding alternative
+
+---
+
+**END OF HANDOFF - Full investigation complete, awaiting next engineer!** 🔧

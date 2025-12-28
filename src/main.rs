@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     tracing::info!("  Watching: {}", watch_dir);
 
     // ========== INITIALIZE HOLLOW DRIVE (FUSE Loop) ==========
-    let mut hollow_drive = HollowDrive::new(global_state);
+    let hollow_drive = HollowDrive::new(global_state);
     tracing::info!("✓ Hollow Drive (FUSE) ready");
 
     tracing::info!("=");

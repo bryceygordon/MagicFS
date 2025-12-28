@@ -7,7 +7,6 @@
 //! - Updating file metadata (mtime, size)
 //! - Deleting files from the registry
 
-use std::sync::Arc;
 use rusqlite::params;
 use crate::{SharedState, error::Result};
 

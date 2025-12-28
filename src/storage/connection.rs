@@ -3,15 +3,15 @@
 //! Provides lazy initialization and connection management for the database.
 //! Works with GlobalState's db_connection field.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use rusqlite::Connection;
-use crate::{GlobalState, SharedState};
+use crate::SharedState;
 
 /// Register sqlite-vec extension with SQLite
 fn register_sqlite_vec_extension() -> crate::error::Result<()> {
     unsafe {
-        // Import the sqlite3_vec_init function from sqlite-vec crate
-        // Must use transmute to cast to the correct function pointer type
+        // Register the sqlite-vec extension
+        // Need to transmute the function pointer to the correct signature
         let result = rusqlite::ffi::sqlite3_auto_extension(Some(
             std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ())
         ));

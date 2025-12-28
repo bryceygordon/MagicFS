@@ -130,7 +130,7 @@ impl Oracle {
             };
 
             // Process any new queries
-            for (query, inode_num) in queries_to_process {
+            for (query, _inode_num) in queries_to_process {
                 let state_to_process = Arc::clone(&state);
                 processed_queries.insert(query.clone());
 
@@ -151,7 +151,7 @@ impl Oracle {
                     let actual_path = file_path.trim_start_matches("DELETE:").to_string();
                     processed_files.insert(file_path.clone());
 
-                    // Spawn task to handle delete
+                    // Deletes are fast, can spawn
                     tokio::spawn(async move {
                         if let Err(e) = Oracle::handle_file_delete(state_to_process, actual_path).await {
                             tracing::error!("[Oracle] Error handling file delete: {}", e);
@@ -159,13 +159,10 @@ impl Oracle {
                     });
                 } else {
                     processed_files.insert(file_path.clone());
-
-                    // Spawn task to index this file
-                    tokio::spawn(async move {
-                        if let Err(e) = Oracle::index_file(state_to_process, file_path).await {
-                            tracing::error!("[Oracle] Error indexing file: {}", e);
-                        }
-                    });
+                    // Indexing is heavy and uses FFI (FastEmbed/SQLite), process sequentially
+                    if let Err(e) = Oracle::index_file(state_to_process, file_path).await {
+                        tracing::error!("[Oracle] Error indexing file: {}", e);
+                    }
                 }
             }
         }
@@ -186,7 +183,7 @@ impl Oracle {
                     tracing::info!("[Oracle] Embedding model loaded successfully");
 
                     // Store model in global state (replace the placeholder)
-                    let mut state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
+                    let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                     *state_guard.embedding_model.lock().unwrap() = Some(model);
 
                     tracing::info!("[Oracle] Embedding model initialization complete");
@@ -236,7 +233,7 @@ impl Oracle {
         };
 
         {
-            let mut state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             state_guard.search_results.insert(inode_num, results.clone());
         }
 
@@ -332,7 +329,7 @@ impl Oracle {
         let embedding = Oracle::generate_embedding_for_content(state.clone(), text_content.clone()).await?;
 
         // Step 3: Register file in database
-        let (file_id, inode) = {
+        let (file_id, _inode) = {
             // Generate a simple inode (in production, use actual filesystem inodes)
             let inode = file_path.len() as u64 + 0x100000; // Simple hash-based inode
 
@@ -379,11 +376,9 @@ impl Oracle {
     fn invalidate_caches_after_index(state: SharedState, file_path: String) -> Result<()> {
         // Clear all search results caches since the index has changed
         // This ensures that new searches will pick up the newly indexed file
-        {
-            let mut state_guard = state.write()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            state_guard.search_results.clear();
-        }
+        let state_guard = state.write()
+            .map_err(|_| MagicError::State("Poisoned lock".into()))?;
+        state_guard.search_results.clear();
 
         tracing::debug!("[Oracle] Cleared search results cache after indexing: {}", file_path);
         Ok(())
@@ -392,11 +387,9 @@ impl Oracle {
     /// Invalidate caches after file deletion (Phase 5 Step 8)
     fn invalidate_caches_after_delete(state: SharedState, file_path: String) -> Result<()> {
         // Clear all search results caches since the index has changed
-        {
-            let mut state_guard = state.write()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            state_guard.search_results.clear();
-        }
+        let state_guard = state.write()
+            .map_err(|_| MagicError::State("Poisoned lock".into()))?;
+        state_guard.search_results.clear();
 
         tracing::debug!("[Oracle] Cleared search results cache after deletion: {}", file_path);
         Ok(())

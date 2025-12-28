@@ -7,7 +7,7 @@
 //! Returns EAGAIN or placeholder if data is missing.
 //! NEVER blocks the FUSE loop for >10ms.
 
-use fuser::{Filesystem, ReplyEmpty, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyStatfs, ReplyOpen, ReplyData, Request};
+use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyStatfs, ReplyOpen, ReplyData, Request};
 use std::sync::Arc;
 use crate::state::SharedState;
 use crate::error::{Result, MagicError};
@@ -22,20 +22,6 @@ impl HollowDrive {
     /// Create a new Hollow Drive instance
     pub fn new(state: SharedState) -> Self {
         Self { state }
-    }
-
-    /// Parse virtual path and return dynamic inode
-    fn parse_search_path(&self, path: &str) -> Option<String> {
-        // Virtual layout: /search/[query_string]/
-        if path.starts_with("/search/") && path.len() > "/search/".len() {
-            let query = &path["/search/".len()..];
-            // Remove trailing slash if present
-            let query = query.trim_end_matches('/');
-            if !query.is_empty() {
-                return Some(query.to_string());
-            }
-        }
-        None
     }
 
     /// Get or create dynamic inode for a query
@@ -53,7 +39,7 @@ impl HollowDrive {
         // Create new inode (simple hash for now, will be replaced with DB inode later)
         let new_inode = self.hash_to_inode(query);
         {
-            let mut state_guard = self.state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            let state_guard = self.state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             state_guard.active_searches.insert(query.to_string(), new_inode);
         }
 
@@ -183,7 +169,7 @@ impl Filesystem for HollowDrive {
                         let search_inode = hasher.finish() as u64 | 0x8000000000000000; // Mark as dynamic inode
 
                         // Add the search query to active_searches so Oracle can pick it up
-                        let mut state_guard = state_for_oracle.write().unwrap();
+                        let state_guard = state_for_oracle.write().unwrap();
                         state_guard.active_searches.insert(query_for_oracle.clone(), search_inode);
                     });
 
@@ -272,7 +258,6 @@ impl Filesystem for HollowDrive {
     }
 
     fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        use std::time::SystemTime;
         use fuser::FileType;
 
         tracing::debug!("[HollowDrive] readdir: ino={}, offset={}", ino, offset);
@@ -284,13 +269,14 @@ impl Filesystem for HollowDrive {
 
         // Root directory
         if ino == 1 {
-            let mut all_entries = entries.clone();
-            all_entries.extend_from_slice(&[
+            let all_entries = entries.clone();
+            let mut root_entries = all_entries;
+            root_entries.extend_from_slice(&[
                 (2, FileType::Directory, ".magic".to_string()),
                 (3, FileType::Directory, "search".to_string()),
             ]);
 
-            for (i, (ino, file_type, name)) in all_entries.iter().enumerate().skip(offset as usize) {
+            for (i, (ino, file_type, name)) in root_entries.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i + 1) as i64, *file_type, name) {
                     break;
                 }
@@ -301,8 +287,7 @@ impl Filesystem for HollowDrive {
 
         // .magic directory
         if ino == 2 {
-            let mut all_entries = entries;
-            // TODO: Add config.db and other .magic files here
+            let all_entries = entries;
             for (i, (ino, file_type, name)) in all_entries.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i + 1) as i64, *file_type, name) {
                     break;
@@ -314,7 +299,8 @@ impl Filesystem for HollowDrive {
 
         // search directory
         if ino == 3 {
-            let mut all_entries = entries;
+            let all_entries = entries;
+            let mut search_entries = all_entries;
             // List active searches
             let state_guard = self.state.read().map_err(|_| {
                 tracing::error!("[HollowDrive] Failed to acquire read lock for readdir");
@@ -324,11 +310,11 @@ impl Filesystem for HollowDrive {
             for entry in state_guard.active_searches.iter() {
                 let query = entry.key();
                 let search_inode = *entry.value();
-                all_entries.push((search_inode, FileType::Directory, query.clone()));
+                search_entries.push((search_inode, FileType::Directory, query.clone()));
             }
             drop(state_guard);
 
-            for (i, (ino, file_type, name)) in all_entries.iter().enumerate().skip(offset as usize) {
+            for (i, (ino, file_type, name)) in search_entries.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i + 1) as i64, *file_type, name) {
                     break;
                 }
