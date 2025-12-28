@@ -156,8 +156,11 @@ impl Oracle {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
                 
-                // Only take files if we haven't processed them to avoid loops
-                // Note: In production we'd want a more robust queue system
+                // DEBUG LOGGING
+                if !files_to_index_lock.is_empty() {
+                    tracing::debug!("[Oracle] Found {} files in queue", files_to_index_lock.len());
+                }
+
                 files_to_index_lock.drain(..)
                     .filter(|file| !processed_files.contains(file))
                     .collect()

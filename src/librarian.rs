@@ -9,84 +9,76 @@ use notify::{RecommendedWatcher, Watcher, Event, EventKind, RecursiveMode};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Helper struct to manage ignore rules
+/// Manages ignore rules (like .gitignore)
 struct IgnoreManager {
-    rules: Vec<String>,
+    rules: HashMap<PathBuf, HashSet<String>>,
 }
 
 impl IgnoreManager {
     fn new() -> Self {
-        Self { rules: Vec::new() }
+        Self { rules: HashMap::new() }
     }
 
-    /// Load rules from .magicfsignore in the given root directory
-    fn load_from_dir(&mut self, root: &Path) {
+    fn load_rules_for_root(&mut self, root: &Path) {
         let ignore_file = root.join(".magicfsignore");
-        
-        tracing::info!("[Librarian] Looking for ignore file at: {}", ignore_file.display());
+        let mut new_rules = HashSet::new();
+
+        new_rules.insert(".magicfsignore".to_string());
+        new_rules.insert(".magicfs".to_string());
 
         if ignore_file.exists() {
+            tracing::info!("[Librarian] Loading ignore rules from: {}", ignore_file.display());
             match fs::read_to_string(&ignore_file) {
                 Ok(content) => {
-                    tracing::info!("[Librarian] Found .magicfsignore. Parsing rules...");
                     for line in content.lines() {
                         let rule = line.trim();
-                        // Basic rule parsing: ignore empty lines and comments
                         if !rule.is_empty() && !rule.starts_with('#') {
-                            self.rules.push(rule.to_string());
-                            tracing::info!("[Librarian] + Added ignore rule: '{}'", rule);
+                            new_rules.insert(rule.to_string());
                         }
                     }
                 },
                 Err(e) => tracing::error!("[Librarian] Failed to read .magicfsignore: {}", e),
             }
-        } else {
-            tracing::info!("[Librarian] No .magicfsignore file found.");
         }
+        self.rules.insert(root.to_path_buf(), new_rules);
     }
 
-    /// Check if a path should be ignored based on loaded rules
-    fn is_ignored(&self, path: &Path) -> bool {
-        // Always ignore the ignore file itself
-        if path.file_name().map_or(false, |n| n == ".magicfsignore") {
-            return true;
-        }
-        
-        // Check if any component of the path matches a rule
-        // This handles "secrets" matching "/path/to/secrets/file.txt"
-        for component in path.components() {
-            let comp_str = component.as_os_str().to_string_lossy();
-            for rule in &self.rules {
-                if comp_str == *rule {
-                    // Log at INFO level so it appears in standard run logs
-                    tracing::info!("[Librarian] IGNORED '{}' because it matches rule '{}'", path.display(), rule);
-                    return true;
+    fn is_ignored(&self, abs_path: &Path, watch_roots: &[String]) -> bool {
+        let root = watch_roots.iter()
+            .map(Path::new)
+            .find(|root| abs_path.starts_with(root));
+
+        let root = match root {
+            Some(r) => r,
+            None => return false,
+        };
+
+        if let Some(rules) = self.rules.get(root) {
+            if let Ok(relative) = abs_path.strip_prefix(root) {
+                for component in relative.components() {
+                    let comp_str = component.as_os_str().to_string_lossy();
+                    if rules.contains(comp_str.as_ref()) {
+                        tracing::debug!("[Librarian] IGNORED '{}' (matched rule '{}')", abs_path.display(), comp_str);
+                        return true;
+                    }
                 }
             }
         }
-        
         false
     }
 }
 
-/// The Librarian: background watcher thread
 pub struct Librarian {
-    /// Shared state for coordination
     pub state: SharedState,
-
-    /// Paths being watched
     pub watch_paths: Arc<Mutex<Vec<String>>>,
-
-    /// Handle to the watcher thread
     pub thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Librarian {
-    /// Create a new Librarian instance
     pub fn new(state: SharedState) -> Self {
         Self {
             state,
@@ -95,7 +87,6 @@ impl Librarian {
         }
     }
 
-    /// Start the watcher thread
     pub fn start(&mut self) -> Result<()> {
         let watch_paths = Arc::clone(&self.watch_paths);
         let state = Arc::clone(&self.state);
@@ -106,50 +97,40 @@ impl Librarian {
 
         self.thread_handle = Some(handle);
         tracing::info!("[Librarian] Started watcher thread");
-
         Ok(())
     }
 
-    /// Add a path to the watch list
     pub fn add_watch_path(&self, path: String) -> Result<()> {
         let mut paths = self.watch_paths.lock().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
         
+        // REVERTED: Do not canonicalize. Watch exactly what the user provided.
         paths.push(path.clone());
-        
         tracing::info!("[Librarian] Added watch path: {}", path);
         Ok(())
     }
 
-    /// Main watcher loop (runs on dedicated thread)
     fn watcher_loop(watch_paths: Arc<Mutex<Vec<String>>>, state: SharedState) {
         tracing::info!("[Librarian] Watcher loop started");
 
-        // Initialize Ignore Manager
-        let mut ignore_manager = IgnoreManager::new();
-        
-        // Load ignore rules and perform initial scan
-        {
-            let paths = match watch_paths.lock() {
-                Ok(guard) => guard.clone(),
-                Err(_) => Vec::new(),
-            };
+        let paths_vec = match watch_paths.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => Vec::new(),
+        };
 
-            for path_str in &paths {
-                let path = Path::new(path_str);
-                
-                // 1. Load rules for this watch root FIRST
-                ignore_manager.load_from_dir(path);
-                
-                // 2. Scan using those rules
-                if let Err(e) = Self::scan_directory_for_files(&state, path, &ignore_manager) {
-                    tracing::error!("[Librarian] Error scanning directory {}: {}", path_str, e);
-                } else {
-                    tracing::info!("[Librarian] Initial scan complete for: {}", path_str);
-                }
+        let mut ignore_manager = IgnoreManager::new();
+        for path_str in &paths_vec {
+            ignore_manager.load_rules_for_root(Path::new(path_str));
+        }
+
+        // Initial Scan
+        for path_str in &paths_vec {
+            let path = Path::new(path_str);
+            tracing::info!("[Librarian] Scanning root: {}", path_str);
+            if let Err(e) = Self::scan_directory_for_files(&state, path, &ignore_manager, &paths_vec) {
+                tracing::error!("[Librarian] Error scanning directory {}: {}", path_str, e);
             }
         }
 
-        // Initialize notify watcher
         let (tx, rx) = mpsc::channel();
         let mut watcher = match RecommendedWatcher::new(tx, notify::Config::default()) {
             Ok(w) => w,
@@ -159,41 +140,61 @@ impl Librarian {
             }
         };
 
-        // Add watches
-        {
-            let paths = match watch_paths.lock() {
-                Ok(guard) => guard.clone(),
-                Err(_) => Vec::new(),
-            };
-            for path in paths {
-                if let Err(e) = watcher.watch(Path::new(&path), RecursiveMode::Recursive) {
-                    tracing::error!("[Librarian] Failed to watch path {}: {}", path, e);
-                }
+        for path in &paths_vec {
+            tracing::info!("[Librarian] Watching: {}", path);
+            if let Err(e) = watcher.watch(Path::new(path), RecursiveMode::Recursive) {
+                tracing::error!("[Librarian] Failed to watch path {}: {}", path, e);
             }
         }
 
-        // Debounce setup
         let debounce_duration = Duration::from_millis(500);
         let mut event_queue: HashMap<PathBuf, Event> = HashMap::new();
         let mut last_activity = Instant::now();
 
-        // Main event loop
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(event) => {
-                    if let Ok(event) = event {
-                        for path in &event.paths {
-                            event_queue.insert(path.clone(), event.clone());
+                Ok(event_res) => {
+                    if let Ok(event) = event_res {
+                        // DEBUG LOG: See if notify is even firing
+                        tracing::debug!("[Librarian] RAW EVENT: {:?}", event);
+                        
+                        // FIX: Only debounce events we actually care about.
+                        let is_relevant = match event.kind {
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
+                            _ => false,
+                        };
+
+                        if is_relevant {
+                            for path in &event.paths {
+                                event_queue.insert(path.clone(), event.clone());
+                            }
+                            last_activity = Instant::now();
                         }
-                        last_activity = Instant::now();
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if !event_queue.is_empty() && last_activity.elapsed() >= debounce_duration {
+                        tracing::debug!("[Librarian] Processing debounced batch of {} events", event_queue.len());
                         let events_to_process = std::mem::take(&mut event_queue);
-                        for (_path, event) in events_to_process {
-                            // Pass ignore_manager to event handler
-                            if let Err(e) = Self::handle_file_event(&Ok(event), &state, &ignore_manager) {
+                        
+                        // PASS 1: Update ignore rules FIRST
+                        for (path, _) in &events_to_process {
+                            if path.file_name().map_or(false, |n| n == ".magicfsignore") {
+                                tracing::info!("[Librarian] .magicfsignore modified. Reloading rules...");
+                                if let Some(root) = paths_vec.iter().map(Path::new).find(|r| path.starts_with(r)) {
+                                    ignore_manager.load_rules_for_root(root);
+                                }
+                            }
+                        }
+
+                        // PASS 2: Process all files (now using updated rules)
+                        for (path, event) in events_to_process {
+                            // Skip the ignore file itself in pass 2 (already handled)
+                            if path.file_name().map_or(false, |n| n == ".magicfsignore") {
+                                continue;
+                            }
+                            
+                            if let Err(e) = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec) {
                                 tracing::error!("[Librarian] Error handling file event: {}", e);
                             }
                         }
@@ -207,26 +208,29 @@ impl Librarian {
         }
     }
 
-    /// Recursively scan directory with ignore support
-    fn scan_directory_for_files(state: &SharedState, dir_path: &Path, ignore_manager: &IgnoreManager) -> Result<()> {
-        if !dir_path.exists() || !dir_path.is_dir() {
+    fn scan_directory_for_files(state: &SharedState, dir_path: &Path, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
+        if !dir_path.exists() {
+            tracing::warn!("[Librarian] Scan path does not exist: {}", dir_path.display());
             return Ok(());
         }
 
-        // Use filter_entry to prevent descending into ignored directories
         let walker = walkdir::WalkDir::new(dir_path).into_iter();
         
-        // This efficiently stops walkdir from entering ignored directories (like secrets/)
-        let filtered_walker = walker.filter_entry(|e| !ignore_manager.is_ignored(e.path()));
+        let filtered_walker = walker.filter_entry(|e| {
+            !ignore_manager.is_ignored(e.path(), watch_roots)
+        });
 
         for entry in filtered_walker {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
-                    
                     if path.is_file() {
+                        if ignore_manager.is_ignored(path, watch_roots) {
+                            continue;
+                        }
                         let path_str = path.to_string_lossy().to_string();
-                        // Add to indexing queue
+                        tracing::debug!("[Librarian] Scan found file: {}", path_str);
+                        
                         let files_to_index = {
                             let state_guard = state.read().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
                             Arc::clone(&state_guard.files_to_index)
@@ -241,22 +245,19 @@ impl Librarian {
         Ok(())
     }
 
-    /// Handle file system event with ignore support
-    fn handle_file_event(event: &std::result::Result<Event, notify::Error>, state: &SharedState, ignore_manager: &IgnoreManager) -> Result<()> {
+    fn handle_file_event(event: &std::result::Result<Event, notify::Error>, state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         match event {
             Ok(event) => {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         for path in &event.paths {
-                            
-                            // CHECK IGNORE RULES
-                            if ignore_manager.is_ignored(path) {
-                                tracing::debug!("[Librarian] Ignoring event for: {:?}", path);
+                            if ignore_manager.is_ignored(path, watch_roots) {
                                 continue;
                             }
-
                             if path.is_file() {
                                 let path_str = path.to_string_lossy().to_string();
+                                tracing::info!("[Librarian] Queuing file for index: {}", path_str);
+                                
                                 let files_to_index = {
                                     let state_guard = state.read().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
                                     Arc::clone(&state_guard.files_to_index)
@@ -268,12 +269,12 @@ impl Librarian {
                     }
                     EventKind::Remove(_) => {
                         for path in &event.paths {
-                            // Check ignore rules for delete events too
-                            if ignore_manager.is_ignored(path) {
+                            if ignore_manager.is_ignored(path, watch_roots) {
                                 continue;
                             }
-                            
                             let path_str = path.to_string_lossy().to_string();
+                            tracing::info!("[Librarian] Queuing file for deletion: {}", path_str);
+                            
                             let files_to_index = {
                                 let state_guard = state.read().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
                                 Arc::clone(&state_guard.files_to_index)
@@ -290,11 +291,9 @@ impl Librarian {
         Ok(())
     }
 
-    /// Stop the watcher thread
     pub fn stop(&mut self) -> Result<()> {
         if let Some(handle) = self.thread_handle.take() {
             handle.join().map_err(|_| crate::error::MagicError::State("Failed to join watcher thread".into()))?;
-            tracing::info!("[Librarian] Stopped");
         }
         Ok(())
     }
