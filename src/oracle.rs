@@ -65,7 +65,6 @@ impl Oracle {
 
         // Store the sender in global state
         {
-            // FIX: Removed unnecessary 'mut'
             let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             *state_guard.embedding_tx.write().unwrap() = Some(tx);
         }
@@ -78,7 +77,6 @@ impl Oracle {
             // Initialize model on this thread
             let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15));
             
-            // FIX: Added 'mut' because embed() requires mutable access
             let mut model = match model_result {
                 Ok(m) => {
                     tracing::info!("[EmbeddingActor] Model loaded successfully");
@@ -211,7 +209,6 @@ impl Oracle {
         // FIX: Lifetime issue resolved by extracting value immediately
         let inode_num = {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            // .map(|v| *v.value()) copies the u64 out, allowing the Ref (and guard) to drop cleanly
             state_guard.active_searches.get(&query)
                 .map(|v| *v.value())
                 .ok_or_else(|| MagicError::State("Query not found".into()))?
@@ -355,23 +352,35 @@ impl Oracle {
     }
 }
 
-// Keep the perform_sqlite_vector_search function unchanged
+// FIX: Updated query to use subquery, ensuring LIMIT applies to vec0
 fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -> Result<Vec<SearchResult>> {
     let embedding_bytes: Vec<u8> = bytemuck::cast_slice(query_embedding).to_vec();
+    
+    // We must use a subquery to ensure the LIMIT applies directly to the vec0 virtual table
+    // BEFORE joining, otherwise the query optimizer fails to push down the limit
     let query_sql = "
         SELECT
             fr.file_id,
             fr.abs_path,
-            distance as score
-        FROM vec_index v
-        JOIN file_registry fr ON v.file_id = fr.file_id
-        WHERE v.embedding MATCH ?
-        LIMIT 10";
+            v.distance as score
+        FROM (
+            SELECT file_id, distance
+            FROM vec_index
+            WHERE embedding MATCH ?
+            ORDER BY distance
+            LIMIT 10
+        ) v
+        JOIN file_registry fr ON v.file_id = fr.file_id";
 
     let mut stmt = db_conn.prepare(query_sql)?;
     let results = stmt.query_map(params![embedding_bytes], |row| {
         let abs_path: String = row.get("abs_path")?;
-        let score: f32 = row.get("score")?;
+        // Convert distance to similarity score (approximate)
+        // distance is cosine distance (0 to 2), so 1 - distance/2 is roughly similarity?
+        // Actually, let's just return 1.0 - distance for now as a simple metric
+        let distance: f32 = row.get("score")?;
+        let score = 1.0 - distance;
+
         let filename = std::path::Path::new(&abs_path)
             .file_name()
             .and_then(|name| name.to_str())
