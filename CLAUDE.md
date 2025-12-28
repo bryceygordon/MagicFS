@@ -340,6 +340,14 @@ SELECT * FROM file_registry LIMIT 10;
    - **Status**: Bug identified, enhanced logging added, awaiting fix
    - **Code**: `src/oracle.rs` line 117-120 (enhanced debugging)
 
+9. **Amnesiac Deletion Race Condition** ✅ FIXED (2025-12-28)
+   - **Problem**: Librarian deleted from file_registry before Oracle could retrieve file_id for vec_index cleanup
+   - **Symptom**: Vector embeddings orphaned in vec_index after file deletion
+   - **Root Cause**: Librarian was executioner, not observer; violated three-organ isolation
+   - **Fix**: Librarian now only signals deletion events; Oracle handles atomic cleanup
+   - **Code**: `src/librarian.rs` lines 238-265 (EventKind::Remove handler)
+   - **Impact**: File deletion pipeline now maintains data consistency
+
 **Testing Commands**:
 ```bash
 # Clean start (recommended)
