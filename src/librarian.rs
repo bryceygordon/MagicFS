@@ -238,31 +238,29 @@ impl Librarian {
                     EventKind::Remove(_) => {
                         for path in &event.paths {
                             let path_str = path.to_string_lossy().to_string();
-                            tracing::info!("[Librarian] File removed: {}", path_str);
+                            tracing::info!("[Librarian] Queuing file for deletion: {}", path_str);
 
-                            // Phase 5 Step 6: Remove from database (vec_index + file_registry)
-                            if let Err(e) = crate::storage::delete_file(state, &path_str) {
-                                tracing::error!("[Librarian] Failed to delete file from registry: {}", e);
-                            }
+                            // CRITICAL FIX: Librarian is "The Hands" (observer), not the executioner.
+                            // We must NOT delete from registry here - let Oracle handle it atomically.
+                            // This prevents the "Amnesiac Deletion" race condition where:
+                            // 1. Librarian deletes from file_registry
+                            // 2. Oracle tries to get file_id but gets None
+                            // 3. Embedding in vec_index becomes orphaned forever
 
-                            // Phase 5 Step 8: Invalidate caches
-                            // Notify Oracle to clear caches
-                            {
+                            let files_to_index = {
                                 let state_guard = state.read()
                                     .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
+                                Arc::clone(&state_guard.files_to_index)
+                            };
 
-                                // Create a simple notification mechanism
-                                // In a real implementation, we'd have a proper queue
-                                // For now, we'll add a special marker to files_to_index
-                                let files_to_index = Arc::clone(&state_guard.files_to_index);
-                                drop(state_guard);
+                            let mut queue = files_to_index.lock()
+                                .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
 
-                                let mut queue = files_to_index.lock()
-                                    .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
-
-                                // Add a delete marker (paths starting with DELETE: will be treated as delete events)
-                                queue.push(format!("DELETE:{}", path_str));
-                            }
+                            // Push DELETE marker - Oracle will handle atomic cleanup:
+                            // 1. Get file_id from file_registry
+                            // 2. Delete embedding from vec_index
+                            // 3. Delete file from file_registry
+                            queue.push(format!("DELETE:{}", path_str));
                         }
                     }
                     _ => {
