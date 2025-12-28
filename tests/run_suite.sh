@@ -13,6 +13,9 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# FORCE SANE TERMINAL AT START
+stty sane
+
 echo -e "${GREEN}=== MagicFS Test Suite ===${NC}"
 
 # 0. Sudo Refresh
@@ -21,15 +24,18 @@ if ! sudo -v; then
     echo -e "${RED}Sudo authentication failed.${NC}"
     exit 1
 fi
-( while true; do sudo -v; sleep 60; done; ) &
+# Keep sudo alive in background (silenced stdout/stderr)
+( while true; do sudo -v; sleep 60; done; ) > /dev/null 2>&1 &
 SUDO_KEEPALIVE_PID=$!
 
 # 1. Cleanup Function
 cleanup() {
-    # FIX: Fix terminal staircasing
+    # CRITICAL: Fix terminal state immediately upon exit/interrupt
     stty sane 
 
+    echo "" # Force a newline
     echo "Cleaning up..."
+    
     kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
     
     # Kill magicfs aggressively
@@ -54,9 +60,9 @@ trap cleanup EXIT
 cleanup
 
 # 2. Build
-echo "Building MagicFS..."
-cargo build
-if [ $? -ne 0 ]; then
+echo -e "Building MagicFS..."
+# Check if build succeeds
+if ! cargo build --quiet; then
     echo -e "${RED}Build failed.${NC}"
     exit 1
 fi
@@ -73,8 +79,9 @@ echo "Rust is a systems programming language." > "$WATCH_DIR/Projects/main.rs"
 echo "Secret git config" > "$WATCH_DIR/.git/config"
 echo "Obsidian workspace settings" > "$WATCH_DIR/.obsidian/workspace.json"
 
-# 4. Run MagicFS (Redirecting logs to file to prevent staircase effect)
+# 4. Run MagicFS
 echo -e "${GREEN}Launching MagicFS... (Logs -> $LOG_FILE)${NC}"
+# Redirect both stdout and stderr to file to keep terminal clean
 sudo RUST_LOG=info $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
 MAGIC_PID=$!
 
@@ -89,8 +96,12 @@ if ! ps -p $MAGIC_PID > /dev/null; then
 fi
 
 # 5. Verify
+# CRITICAL FIX: Force terminal sanity before python takes over stdout
+stty sane
+
 echo -e "${GREEN}Running Verification Logic...${NC}"
-set +e # Turn off exit-on-error so we can handle python failure manually
+
+set +e # Turn off exit-on-error for python step
 python3 tests/verify.py "$DB_PATH" "$MOUNT_POINT"
 TEST_EXIT_CODE=$?
 set -e
