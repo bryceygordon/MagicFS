@@ -1,0 +1,2 @@
+- [ ] make it so that tests have all their setup within the test itself and not inside tests/run_suite.sh
+- [ ] need to add a project philosophy that we are a fail first philosophy

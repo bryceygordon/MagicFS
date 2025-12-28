@@ -74,6 +74,16 @@ echo "Rust is a systems programming language." > "$WATCH_DIR/Projects/main.rs"
 echo "Secret git config" > "$WATCH_DIR/.git/config"
 echo "Obsidian workspace settings" > "$WATCH_DIR/.obsidian/workspace.json"
 
+# -- Data for Ignore Test (Custom Ignore Rule) --
+# This directory DOES NOT start with a dot. Standard logic would index it.
+mkdir -p "$WATCH_DIR/secrets"
+echo "Super sensitive password" > "$WATCH_DIR/secrets/passwords.txt"
+
+# -- Create .magicfsignore --
+echo ".git" > "$WATCH_DIR/.magicfsignore"
+echo ".obsidian" >> "$WATCH_DIR/.magicfsignore"
+echo "secrets" >> "$WATCH_DIR/.magicfsignore" # <--- The new rule
+
 # -- Create .magicfsignore --
 echo ".git" > "$WATCH_DIR/.magicfsignore"
 echo ".obsidian" >> "$WATCH_DIR/.magicfsignore"
