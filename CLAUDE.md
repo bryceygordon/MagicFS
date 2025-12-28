@@ -317,6 +317,29 @@ SELECT * FROM file_registry LIMIT 10;
    - **Query**: Removed ORDER BY with `<=>`, now relies on MATCH's built-in ranking
    - **Code**: `src/oracle.rs` perform_sqlite_vector_search function
 
+6. **Inode UNIQUE Constraint Bug** ✅ FIXED (2025-12-28)
+   - **Problem**: file_registry.inode had UNIQUE constraint, causing errors when multiple files indexed
+   - **Symptom**: "UNIQUE constraint failed: file_registry.inode"
+   - **Root Cause**: Inodes can collide across different filesystems; should not be UNIQUE
+   - **Fix**: Removed UNIQUE constraint from inode column in database schema
+   - **Code**: `src/storage/connection.rs`, `src/storage/init.rs`
+   - **Impact**: Files can now be indexed without inode conflicts
+
+7. **Active Searches Population Bug** ✅ FIXED (2025-12-28)
+   - **Problem**: HollowDrive spawned dummy async task that didn't populate active_searches
+   - **Symptom**: Search directories created but remain empty (no results files)
+   - **Root Cause**: HollowDrive::lookup() spawned task that did nothing ("let _ = query_for_oracle")
+   - **Fix**: Added code to actually insert queries into GlobalState.active_searches
+   - **Code**: `src/hollow_drive.rs` lines 177-188
+   - **Impact**: Semantic searches now trigger Oracle processing
+
+8. **Model Disappearance Bug** ❌ UNRESOLVED (2025-12-28)
+   - **Problem**: FastEmbed model becomes None after initial load, causing infinite loop
+   - **Symptom**: Repeating "Model not ready, skipping file indexing" every 100ms
+   - **Root Cause**: Likely `.take()` calls removing model from state without restoration
+   - **Status**: Bug identified, enhanced logging added, awaiting fix
+   - **Code**: `src/oracle.rs` line 117-120 (enhanced debugging)
+
 **Testing Commands**:
 ```bash
 # Clean start (recommended)
