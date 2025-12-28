@@ -11,15 +11,14 @@ LOG_FILE="tests/magicfs.log"
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Disable job control messages (prevents "Killed..." output)
+# Disable job control messages
 set +m
-
-# Force sanity immediately
 stty sane
 
-echo -e "${GREEN}=== MagicFS Test Suite ===${NC}"
+echo -e "${GREEN}=== MagicFS Modular Test Suite ===${NC}"
 
 # 0. Sudo Refresh
 echo "Acquiring sudo privileges..."
@@ -27,46 +26,30 @@ if ! sudo -v; then
     echo -e "${RED}Sudo authentication failed.${NC}"
     exit 1
 fi
-
-# Keep sudo alive in background, silenced
 ( while true; do sudo -v; sleep 60; done; ) > /dev/null 2>&1 &
 SUDO_KEEPALIVE_PID=$!
-disown $SUDO_KEEPALIVE_PID # Tell shell to ignore this job
+disown $SUDO_KEEPALIVE_PID
 
 # 1. Cleanup Function
 cleanup() {
-    # Mute any remaining job noise
     set +m 
-    
     echo ""
     echo "Cleaning up..."
-    
-    # Kill sudo keepalive silently
     kill $SUDO_KEEPALIVE_PID 2>/dev/null || true
-    
-    # Kill magicfs aggressively
-    # We use pkill -9 to ensure it dies immediately
     sudo pkill -9 -f "magicfs" > /dev/null 2>&1 || true
-    
-    # Lazy unmount if needed
     if mount | grep -q "$MOUNT_POINT"; then
         sudo umount -l "$MOUNT_POINT" > /dev/null 2>&1 || true
     fi
-    
-    # Remove test artifacts
     if [ -f "$DB_PATH" ]; then
         sudo rm -f "$DB_PATH"
     fi
     sudo rm -rf "$MOUNT_POINT"
     rm -rf "$WATCH_DIR"
-
-    # CRITICAL: Restore terminal sanity as the FINAL step of cleanup
     stty sane
 }
-
 trap cleanup EXIT
 
-# Run pre-cleanup to kill zombies from previous runs
+# Clean zombies first
 cleanup
 
 # 2. Build
@@ -76,49 +59,67 @@ if ! cargo build --quiet; then
     exit 1
 fi
 
-# 3. Setup Data
+# 3. Setup Test Environment (The "Super Set" of data)
 mkdir -p "$MOUNT_POINT"
 mkdir -p "$WATCH_DIR"
 mkdir -p "$WATCH_DIR/.git"
 mkdir -p "$WATCH_DIR/.obsidian"
 mkdir -p "$WATCH_DIR/Projects"
 
+# -- Data for Indexing Test --
 echo "This is a python script about snake games." > "$WATCH_DIR/game.py"
 echo "Rust is a systems programming language." > "$WATCH_DIR/Projects/main.rs"
+
+# -- Data for Ignore Test --
 echo "Secret git config" > "$WATCH_DIR/.git/config"
 echo "Obsidian workspace settings" > "$WATCH_DIR/.obsidian/workspace.json"
 
-# 4. Run MagicFS
+# -- Create .magicfsignore --
+echo ".git" > "$WATCH_DIR/.magicfsignore"
+echo ".obsidian" >> "$WATCH_DIR/.magicfsignore"
+
+# 4. Launch MagicFS
 echo -e "${GREEN}Launching MagicFS... (Logs -> $LOG_FILE)${NC}"
 sudo RUST_LOG=info $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
 MAGIC_PID=$!
-disown $MAGIC_PID # Tell shell to ignore this job
+disown $MAGIC_PID
 
 echo "Waiting for system to mount and index (5 seconds)..."
 sleep 5
 
-# Check if alive (using pgrep because we disowned it)
+# Check survival
 if ! pgrep -f "$BINARY" > /dev/null; then
-    echo -e "${RED}MagicFS died! Dumping log:${NC}"
+    echo -e "${RED}MagicFS died on startup! Dumping log:${NC}"
     cat "$LOG_FILE"
     exit 1
 fi
 
-# 5. Verify
-echo -e "${GREEN}Running Verification Logic...${NC}"
+# 5. Run Test Cases
+echo -e "${BLUE}Starting Test Cases...${NC}"
 
-set +e # Turn off exit-on-error to handle python failure gracefully
-python3 tests/verify.py "$DB_PATH" "$MOUNT_POINT"
-TEST_EXIT_CODE=$?
-set -e
+# We need to export PYTHONPATH so tests can find common.py
+export PYTHONPATH=$PYTHONPATH:$(pwd)/tests
 
-if [ $TEST_EXIT_CODE -eq 0 ]; then
-    echo -e "${GREEN}✅ ALL TESTS PASSED${NC}"
-else
-    echo -e "${RED}❌ TESTS FAILED. Dumping MagicFS Log:${NC}"
-    echo "---------------------------------------------------"
-    cat "$LOG_FILE"
-    echo "---------------------------------------------------"
-fi
+# Loop through all python files in tests/cases/
+for test_file in tests/cases/*.py; do
+    echo -e "\n${BLUE}>>> Running: $(basename "$test_file")${NC}"
+    
+    # Run the test, passing DB path and Mount point
+    # We turn off set -e temporarily to capture the failure
+    set +e
+    python3 "$test_file" "$DB_PATH" "$MOUNT_POINT"
+    RESULT=$?
+    set -e
+    
+    if [ $RESULT -ne 0 ]; then
+        echo -e "${RED}❌ TEST FAILED: $(basename "$test_file")${NC}"
+        echo -e "${RED}Dumping MagicFS Log:${NC}"
+        echo "---------------------------------------------------"
+        cat "$LOG_FILE"
+        echo "---------------------------------------------------"
+        exit 1
+    fi
+done
 
-exit $TEST_EXIT_CODE
+echo -e "\n${GREEN}✅ ALL TEST CASES PASSED${NC}"
+exit 0
