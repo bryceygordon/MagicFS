@@ -1,12 +1,6 @@
-//! Oracle: The Async Brain
-//!
-//! Handles Vector Search (fastembed-rs) and SQLite (sqlite-vec).
-//! Populates the Memory Cache for the Hollow Drive.
-//!
-//! CRITICAL RULE: Runs on Tokio async runtime + blocking compute threads.
-//! Never blocks the FUSE loop.
+// src/oracle.rs
 
-use crate::state::{SharedState, SearchResult};
+use crate::state::{SharedState, SearchResult, EmbeddingRequest};
 use crate::error::{Result, MagicError};
 use tokio::task::JoinHandle;
 use std::sync::Arc;
@@ -15,6 +9,7 @@ use rusqlite::{Connection, params};
 use bytemuck;
 use anyhow;
 use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 
 /// The Oracle: async brain for semantic search
 pub struct Oracle {
@@ -41,10 +36,12 @@ impl Oracle {
         })
     }
 
-    /// Start the Oracle async task
+    /// Start the Oracle async task and the Embedding Actor
     pub fn start(&mut self) -> Result<()> {
-        let state = Arc::clone(&self.state);
+        // Start the dedicated embedding actor thread
+        self.start_embedding_actor()?;
 
+        let state = Arc::clone(&self.state);
         let handle = self.runtime.spawn(async move {
             Oracle::run_task(state).await;
         });
@@ -55,32 +52,76 @@ impl Oracle {
         Ok(())
     }
 
+    /// Start the dedicated thread for the Embedding Model (Actor Pattern)
+    fn start_embedding_actor(&self) -> Result<()> {
+        let state = Arc::clone(&self.state);
+        let (tx, mut rx) = mpsc::channel::<EmbeddingRequest>(100);
+
+        // Store the sender in global state
+        {
+            let mut state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            *state_guard.embedding_tx.write().unwrap() = Some(tx);
+        }
+
+        // Spawn a dedicated OS thread (std::thread)
+        // This ensures the ONNX runtime stays pinned to ONE thread, preventing FFI race conditions
+        std::thread::spawn(move || {
+            tracing::info!("[EmbeddingActor] Starting dedicated model thread...");
+            
+            // Initialize model on this thread
+            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15));
+            
+            let model = match model_result {
+                Ok(m) => {
+                    tracing::info!("[EmbeddingActor] Model loaded successfully");
+                    m
+                },
+                Err(e) => {
+                    tracing::error!("[EmbeddingActor] Failed to load model: {}", e);
+                    return; // Exit thread if model fails
+                }
+            };
+
+            // Process requests loop
+            while let Some(request) = rx.blocking_recv() {
+                let EmbeddingRequest { content, respond_to } = request;
+                
+                // Generate embedding
+                let result = model.embed(vec![content], None)
+                    .map(|mut res| res.remove(0))
+                    .map_err(|e| MagicError::Embedding(format!("FastEmbed error: {}", e)));
+                
+                // Send response back
+                let _ = respond_to.send(result);
+            }
+
+            tracing::info!("[EmbeddingActor] Shutting down");
+        });
+
+        Ok(())
+    }
+
     /// Main async task loop
     async fn run_task(state: SharedState) {
         tracing::info!("[Oracle] Async task started");
 
-        // Wait for embedding model to initialize before processing anything
-        tracing::info!("[Oracle] Waiting for embedding model to initialize...");
-        let mut model_ready = false;
-        for _ in 0..100 { // Wait up to 10 seconds
+        // Wait for embedding actor to be reachable
+        tracing::info!("[Oracle] Waiting for embedding actor...");
+        let mut actor_ready = false;
+        for _ in 0..100 { 
             tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-            // Check if the placeholder has been replaced by trying to read the Mutex
-            if state_guard.embedding_model.try_lock().is_ok() {
-                model_ready = true;
+            let state_guard = state.read().unwrap();
+            if state_guard.embedding_tx.read().unwrap().is_some() {
+                actor_ready = true;
                 break;
             }
         }
 
-        if !model_ready {
-            tracing::warn!("[Oracle] Embedding model not ready after 10 seconds, continuing anyway");
-        } else {
-            tracing::info!("[Oracle] Embedding model ready, proceeding with indexing");
+        if !actor_ready {
+            tracing::error!("[Oracle] Embedding actor failed to initialize!");
+            return;
         }
-
-        // Phase 4: Monitor active_searches for new queries
-        // Phase 5: Monitor files_to_index for new files to index
+        tracing::info!("[Oracle] Embedding actor ready");
 
         let mut processed_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut processed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -91,13 +132,10 @@ impl Oracle {
             // Phase 4: Check for new searches
             let queries_to_process: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-
                 state_guard.active_searches.iter()
                     .filter_map(|entry| {
                         let query = entry.key().clone();
                         let inode_num = *entry.value();
-
-                        // Check if this query hasn't been processed yet and has no results
                         if !processed_queries.contains(&query) && state_guard.search_results.get(&inode_num).is_none() {
                             Some((query, inode_num))
                         } else {
@@ -110,31 +148,19 @@ impl Oracle {
             // Phase 5: Check for new files to index
             let files_to_process: Vec<String> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-
-                // Check if model is ready (has been initialized)
-                let model_ready = state_guard.embedding_model.lock().map(|g| g.is_some()).unwrap_or(false);
-                if !model_ready {
-                    tracing::warn!("[Oracle] Model not ready (placeholder not replaced), skipping file indexing");
-                }
-
-                if !model_ready {
-                    tracing::debug!("[Oracle] Model not ready, skipping file indexing for this iteration");
-                    Vec::new()
-                } else {
-                    let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
-                    let files_to_process: Vec<String> = files_to_index_lock.drain(..)
-                        .filter(|file| !processed_files.contains(file))
-                        .collect();
-                    files_to_process
-                }
+                let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
+                
+                // Only take files if we haven't processed them to avoid loops
+                // Note: In production we'd want a more robust queue system
+                files_to_index_lock.drain(..)
+                    .filter(|file| !processed_files.contains(file))
+                    .collect()
             };
 
-            // Process any new queries
+            // Process queries
             for (query, _inode_num) in queries_to_process {
                 let state_to_process = Arc::clone(&state);
                 processed_queries.insert(query.clone());
-
-                // Spawn task to process this search
                 tokio::spawn(async move {
                     if let Err(e) = Oracle::process_search_query(state_to_process, query).await {
                         tracing::error!("[Oracle] Error processing search: {}", e);
@@ -142,16 +168,13 @@ impl Oracle {
                 });
             }
 
-            // Phase 5: Process any new files
+            // Process files
             for file_path in files_to_process {
                 let state_to_process = Arc::clone(&state);
 
-                // Check if this is a delete marker
                 if file_path.starts_with("DELETE:") {
                     let actual_path = file_path.trim_start_matches("DELETE:").to_string();
                     processed_files.insert(file_path.clone());
-
-                    // Deletes are fast, can spawn
                     tokio::spawn(async move {
                         if let Err(e) = Oracle::handle_file_delete(state_to_process, actual_path).await {
                             tracing::error!("[Oracle] Error handling file delete: {}", e);
@@ -159,77 +182,30 @@ impl Oracle {
                     });
                 } else {
                     processed_files.insert(file_path.clone());
-                    // Indexing is heavy and uses FFI (FastEmbed/SQLite), process sequentially
-                    if let Err(e) = Oracle::index_file(state_to_process, file_path).await {
-                        tracing::error!("[Oracle] Error indexing file: {}", e);
-                    }
+                    // NOTE: Indexing is now safe to spawn concurrently because the Actor serializes the 
+                    // actual embedding generation on its own thread!
+                    tokio::spawn(async move {
+                        if let Err(e) = Oracle::index_file(state_to_process, file_path).await {
+                            tracing::error!("[Oracle] Error indexing file: {}", e);
+                        }
+                    });
                 }
             }
         }
-    }
-
-    /// Spawn a blocking task to initialize embedding model
-    pub fn init_embedding_model(&self) -> Result<()> {
-        let state = Arc::clone(&self.state);
-
-        self.runtime.spawn_blocking(move || {
-            tracing::info!("[Oracle] Initializing embedding model...");
-
-            // Load the BAAI/bge-small-en-v1.5 model (384 dimensions)
-            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15));
-
-            match model_result {
-                Ok(model) => {
-                    tracing::info!("[Oracle] Embedding model loaded successfully");
-
-                    // Store model in global state (replace the placeholder)
-                    let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                    *state_guard.embedding_model.lock().unwrap() = Some(model);
-
-                    tracing::info!("[Oracle] Embedding model initialization complete");
-                }
-                Err(e) => {
-                    tracing::error!("[Oracle] Failed to initialize model: {}", e);
-                    // TODO: Handle initialization failure properly
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    /// Handle a new search query (called by Hollow Drive)
-    pub fn handle_new_search(&self, query: String) -> Result<()> {
-        tracing::info!("[Oracle] Handling new search: {}", query);
-
-        let state = Arc::clone(&self.state);
-
-        // Spawn async task to process the search
-        self.runtime.spawn(async move {
-            if let Err(e) = Oracle::process_search_query(state, query).await {
-                tracing::error!("[Oracle] Error processing search: {}", e);
-            }
-        });
-
-        Ok(())
     }
 
     /// Process a search query end-to-end
     async fn process_search_query(state: SharedState, query: String) -> Result<()> {
         tracing::info!("[Oracle] Processing search: {}", query);
 
-        // Phase 3: Generate embedding for query and search for similar files
         let results = Oracle::perform_vector_search(state.clone(), query.clone()).await?;
 
-        // Update cache
         let inode_num = {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let inode_num = match state_guard.active_searches.get(&query) {
+            match state_guard.active_searches.get(&query) {
                 Some(entry) => *entry.value(),
                 None => return Err(MagicError::State("Query not found".into())),
-            };
-            drop(state_guard);
-            inode_num
+            }
         };
 
         {
@@ -241,29 +217,14 @@ impl Oracle {
         Ok(())
     }
 
-    /// Perform vector similarity search using FastEmbed + sqlite-vec
+    /// Perform vector similarity search
     async fn perform_vector_search(state: SharedState, query: String) -> Result<Vec<SearchResult>> {
-        // Clone the state Arc to share with blocking tasks
-        let state_for_embedding = state.clone();
-        let query_clone = query.clone();
-
-        // Generate embedding for query in a blocking task
-        let query_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
-            // Use std::sync::Mutex which has synchronous lock() for spawn_blocking
-            let state_guard = state_for_embedding.read()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let mut model_lock = state_guard.embedding_model.lock()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let model_ref = model_lock.as_mut()
-                .ok_or_else(|| MagicError::Embedding("Model not initialized".into()))?;
-            model_ref.embed(vec![query_clone.as_str()], None)
-                .map(|mut res| res.remove(0))
-                .map_err(|e| MagicError::Embedding(format!("Failed to embed query: {}", e)))
-        }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Embed task panic")))??;
+        // Step 1: Generate embedding via Actor
+        let query_embedding = Oracle::request_embedding(&state, query.clone()).await?;
 
         tracing::debug!("[Oracle] Generated embedding for query: {} ({} dims)", query, query_embedding.len());
 
-        // Perform vector similarity search using sqlite-vec
+        // Step 2: Database search
         let state_for_search = state.clone();
         let results = tokio::task::block_in_place(move || {
             let state_guard = state_for_search.read()
@@ -279,43 +240,41 @@ impl Oracle {
         Ok(results)
     }
 
-    /// Shutdown the Oracle and cleanup resources
-    pub async fn shutdown(&mut self) -> Result<()> {
-        self.stop().await
+    /// Request an embedding from the Actor
+    async fn request_embedding(state: &SharedState, content: String) -> Result<Vec<f32>> {
+        let tx = {
+            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            let tx_guard = state_guard.embedding_tx.read().unwrap();
+            tx_guard.clone().ok_or_else(|| MagicError::Embedding("Actor not ready".into()))?
+        };
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let req = EmbeddingRequest {
+            content,
+            respond_to: resp_tx,
+        };
+
+        tx.send(req).await.map_err(|_| MagicError::Embedding("Actor channel closed".into()))?;
+
+        resp_rx.await.map_err(|_| MagicError::Embedding("Actor dropped request".into()))?
     }
 
-    /// Generate embedding for file content (Phase 5)
-    /// Called by Librarian when files are created/modified
-    pub async fn generate_file_embedding(&self, content: &str) -> Result<Vec<f32>> {
-        let state = Arc::clone(&self.state);
-        let content_owned = content.to_owned();
-
-        // Use spawn_blocking for embedding generation
-        let handle = self.runtime.spawn_blocking(move || {
-            // Use std::sync::Mutex which has synchronous lock() for spawn_blocking
-            let state_guard = state.read()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let mut model_lock = state_guard.embedding_model.lock()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let model_ref = model_lock.as_mut()
-                .ok_or_else(|| MagicError::Embedding("Model not initialized".into()))?;
-            let embedding_vec = model_ref.embed(vec![content_owned.as_str()], None)
-                .map_err(|e| MagicError::Embedding(format!("Failed to embed content: {}", e)))?;
-
-            Ok::<Vec<f32>, MagicError>(embedding_vec[0].clone())
-        });
-
-        handle.await.map_err(|_| MagicError::Other(anyhow::anyhow!("Embed task panic")))?
+    /// Stop the Oracle
+    pub async fn stop(&mut self) -> Result<()> {
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+            tracing::info!("[Oracle] Stopped");
+        }
+        Ok(())
     }
 
-    /// Index a file: extract text, generate embedding, update database (Phase 5)
+    /// Index a file
     async fn index_file(state: SharedState, file_path: String) -> Result<()> {
         tracing::info!("[Oracle] Indexing file: {}", file_path);
-
-        // Clone file_path for use in spawning tasks
         let file_path_clone = file_path.clone();
 
-        // Step 1: Extract text from file
+        // Step 1: Extract text
         let text_content = tokio::task::spawn_blocking(move || {
             crate::storage::extract_text_from_file(std::path::Path::new(&file_path_clone))
         }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Text extraction task panic")))??;
@@ -325,127 +284,71 @@ impl Oracle {
             return Ok(());
         }
 
-        // Step 2: Generate embedding
-        let embedding = Oracle::generate_embedding_for_content(state.clone(), text_content.clone()).await?;
+        // Step 2: Generate embedding via Actor
+        let embedding = Oracle::request_embedding(&state, text_content).await?;
 
         // Step 3: Register file in database
         let (file_id, _inode) = {
-            // Generate a simple inode (in production, use actual filesystem inodes)
-            let inode = file_path.len() as u64 + 0x100000; // Simple hash-based inode
-
-            // Get file metadata
-            let metadata = std::fs::metadata(&file_path)
-                .map_err(|e| MagicError::Io(e))?;
-
-            let mtime = metadata.modified()
-                .map_err(|e| MagicError::Io(e))?
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
+            let inode = file_path.len() as u64 + 0x100000;
+            let metadata = std::fs::metadata(&file_path).map_err(MagicError::Io)?;
+            let mtime = metadata.modified().map_err(MagicError::Io)?.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
             let size = metadata.len();
             let is_dir = metadata.is_dir();
 
-            // Register file
             let file_id = crate::storage::register_file(
-                &state,
-                &file_path,
-                inode,
-                mtime,
-                size,
-                is_dir
+                &state, &file_path, inode, mtime, size, is_dir
             )?;
-
             (file_id, inode)
         };
 
-        // Step 4: Insert embedding into vec_index (gracefully handle missing table)
+        // Step 4: Insert embedding
         match crate::storage::insert_embedding(&state, file_id, &embedding) {
             Ok(_) => tracing::debug!("Inserted embedding for file_id: {}", file_id),
-            Err(e) => tracing::warn!("Failed to store embedding (vec_index may not be available): {}. File still registered.", e),
+            Err(e) => tracing::warn!("Failed to store embedding: {}", e),
         }
 
-        // Step 8: Invalidate caches
+        // Step 5: Invalidate caches
         Oracle::invalidate_caches_after_index(state.clone(), file_path.clone())?;
 
         tracing::info!("[Oracle] Successfully indexed file: {} (file_id: {})", file_path, file_id);
         Ok(())
     }
 
-    /// Invalidate caches after file indexing (Phase 5 Step 8)
+    // Helper functions for cache invalidation
     fn invalidate_caches_after_index(state: SharedState, file_path: String) -> Result<()> {
-        // Clear all search results caches since the index has changed
-        // This ensures that new searches will pick up the newly indexed file
-        let state_guard = state.write()
-            .map_err(|_| MagicError::State("Poisoned lock".into()))?;
+        let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
         state_guard.search_results.clear();
-
         tracing::debug!("[Oracle] Cleared search results cache after indexing: {}", file_path);
         Ok(())
     }
 
-    /// Invalidate caches after file deletion (Phase 5 Step 8)
     fn invalidate_caches_after_delete(state: SharedState, file_path: String) -> Result<()> {
-        // Clear all search results caches since the index has changed
-        let state_guard = state.write()
-            .map_err(|_| MagicError::State("Poisoned lock".into()))?;
+        let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
         state_guard.search_results.clear();
-
         tracing::debug!("[Oracle] Cleared search results cache after deletion: {}", file_path);
         Ok(())
     }
 
-    /// Handle file deletion: remove from vec_index and file_registry (Phase 5)
     async fn handle_file_delete(state: SharedState, file_path: String) -> Result<()> {
         tracing::info!("[Oracle] Handling file deletion: {}", file_path);
-
-        // Step 1: Get file info before deletion
         let file_record = crate::storage::get_file_by_path(&state, &file_path)?;
 
         if let Some(file_record) = file_record {
-            // Step 2: Delete from vec_index
             crate::storage::delete_embedding(&state, file_record.file_id)?;
-
-            // Step 3: Delete from file_registry (already done by Librarian, but double-check)
             crate::storage::delete_file(&state, &file_path)?;
         } else {
-            tracing::warn!("[Oracle] File not found in registry, skipping deletion: {}", file_path);
+            tracing::warn!("[Oracle] File not found in registry: {}", file_path);
         }
 
-        // Step 4: Invalidate caches
         Oracle::invalidate_caches_after_delete(state.clone(), file_path.clone())?;
-
         tracing::info!("[Oracle] Successfully handled file deletion: {}", file_path);
         Ok(())
     }
-
-    /// Generate embedding for arbitrary content (helper for index_file)
-    async fn generate_embedding_for_content(state: SharedState, content: String) -> Result<Vec<f32>> {
-        let state_for_embedding = state.clone();
-
-        // Generate embedding in a blocking task
-        let query_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
-            // Use std::sync::Mutex which has synchronous lock() for spawn_blocking
-            let state_guard = state_for_embedding.read()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let mut model_lock = state_guard.embedding_model.lock()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let model_ref = model_lock.as_mut()
-                .ok_or_else(|| MagicError::Embedding("Model not initialized".into()))?;
-            model_ref.embed(vec![content.as_str()], None)
-                .map(|mut res| res.remove(0))
-                .map_err(|e| MagicError::Embedding(format!("Failed to embed content: {}", e)))
-        }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Embed task panic")))??;
-
-        Ok(query_embedding)
-    }
 }
 
+// Keep the perform_sqlite_vector_search function unchanged
 fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -> Result<Vec<SearchResult>> {
-    // Convert embedding to bytes for sqlite-vec
     let embedding_bytes: Vec<u8> = bytemuck::cast_slice(query_embedding).to_vec();
-
-    // Use MATCH clause for vector similarity search with sqlite-vec
     let query_sql = "
         SELECT
             fr.file_id,
@@ -457,12 +360,9 @@ fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -
         LIMIT 10";
 
     let mut stmt = db_conn.prepare(query_sql)?;
-
     let results = stmt.query_map(params![embedding_bytes], |row| {
         let abs_path: String = row.get("abs_path")?;
         let score: f32 = row.get("score")?;
-
-        // Extract filename from path
         let filename = std::path::Path::new(&abs_path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -475,22 +375,9 @@ fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -
             score,
             filename,
         })
-    })?.filter_map(|row| row.ok())
-     .collect::<Vec<_>>();
+    })?.filter_map(|row| row.ok()).collect::<Vec<_>>();
 
     Ok(results)
-}
-
-impl Oracle {
-    /// Stop the Oracle task
-    pub async fn stop(&mut self) -> Result<()> {
-        if let Some(handle) = self.task_handle.take() {
-            handle.abort();
-            let _ = handle.await;
-            tracing::info!("[Oracle] Stopped");
-        }
-        Ok(())
-    }
 }
 
 impl Drop for Oracle {
