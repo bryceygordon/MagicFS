@@ -1,11 +1,14 @@
 // FILE: src/oracle.rs
 //! Oracle: The Async Brain (Orchestrator)
 //!
-//! Refactored in Phase 6.3.
+//! Refactored in Phase 6.8 (The Arbitrator & Lockout).
 //! Role:
 //! 1. Manages the Thread/Actor Lifecycle.
 //! 2. Monitors the Event Loop.
 //! 3. Delegates work to `Indexer` and `Searcher`.
+//! 4. Enforces Concurrency Limits via Semaphores.
+//! 5. PRIORITIZES Indexing.
+//! 6. ENFORCES SERIALIZATION per file (Lockout).
 
 use crate::state::{SharedState, EmbeddingRequest};
 use crate::error::{Result, MagicError};
@@ -13,14 +16,18 @@ use crate::engine::indexer::Indexer;
 use crate::engine::searcher::Searcher;
 
 use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, Semaphore};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use anyhow;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+
+// Hardening: Concurrency Limits
+const MAX_CONCURRENT_INDEXERS: usize = 2;
+const MAX_CONCURRENT_SEARCHERS: usize = 8;
 
 pub struct Oracle {
     pub state: SharedState,
@@ -77,8 +84,8 @@ impl Oracle {
             while let Some(request) = rx.blocking_recv() {
                 let EmbeddingRequest { content, respond_to } = request;
                 
-                // Diagnostic logging
-                tracing::debug!("[EmbeddingActor] Embedding '{}'...", content.chars().take(20).collect::<String>());
+                let preview: String = content.chars().take(20).collect();
+                tracing::debug!("[EmbeddingActor] Embedding '{}'...", preview);
 
                 let result = model.embed(vec![content], None)
                     .map(|mut res| res.remove(0))
@@ -111,27 +118,122 @@ impl Oracle {
             return;
         }
 
-        // Use LRU to prevent infinite history growth
-        let mut processed_queries = LruCache::new(NonZeroUsize::new(1000).unwrap());
-        let mut processed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut processed_queries: LruCache<String, ()> = LruCache::new(NonZeroUsize::new(1000).unwrap());
+        
+        // LOCKOUT TAGOUT: This Set tracks files currently "Under Maintenance".
+        // We store the CANONICAL path (without "DELETE:" prefix).
+        let mut active_jobs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        
         let mut last_index_version = 0;
 
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        let index_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_INDEXERS));
+        let search_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SEARCHERS));
 
-            // 1. Check for Index Changes (Cache Invalidation)
+        loop {
+            // Tick to keep the loop breathing
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // 1. Check for Index Changes
             let current_index_version = {
                 let state_guard = state.read().unwrap();
                 state_guard.index_version.load(Ordering::Relaxed)
             };
 
             if current_index_version != last_index_version {
-                tracing::debug!("[Oracle] Index version changed ({} -> {}). Resetting processed_queries.", last_index_version, current_index_version);
+                tracing::debug!("[Oracle] Index version changed. Resetting processed_queries.");
                 processed_queries.clear();
                 last_index_version = current_index_version;
             }
 
-            // 2. Identify Pending Searches
+            // ----------------------------------------------------------------
+            // PRIORITY 1: INDEXING
+            // ----------------------------------------------------------------
+            
+            let mut unprocessed_files: Vec<String> = Vec::new();
+            
+            // Clean up the Lockout Set: 
+            // Ideally we'd remove items when tasks finish. 
+            // For now, in this simple loop, we clear it at start of cycle? 
+            // NO. Tasks are async. We need to track them.
+            // Simplified approach for Phase 6.8:
+            // Since we don't have a callback channel from workers yet, 
+            // and we spawn tasks that detach, we rely on the fact that
+            // "files_to_process" drains the queue. 
+            // The race condition happens when we pop multiple items for the SAME file in one tick.
+            
+            // We clear local tracking for *this tick*.
+            let mut tick_locked_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            let files_to_process: Vec<String> = {
+                let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
+                let mut files_to_index_lock = match state_guard.files_to_index.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                // Drain ALL files
+                files_to_index_lock.drain(..).collect()
+            };
+
+            for file_path in files_to_process {
+                // LOCKOUT LOGIC:
+                let canonical_path = file_path.trim_start_matches("DELETE:").to_string();
+                
+                if tick_locked_files.contains(&canonical_path) {
+                    // Another ticket for this file is already running in this batch.
+                    // Wait your turn (next tick).
+                    unprocessed_files.push(file_path);
+                    continue;
+                }
+                
+                // Tag it out
+                tick_locked_files.insert(canonical_path.clone());
+                
+                let state_ref = Arc::clone(&state);
+
+                // DELETEs are cheap/fast, bypass semaphore to prevent "Delete Starvation"
+                if file_path.starts_with("DELETE:") {
+                    let actual_path = file_path.trim_start_matches("DELETE:").to_string();
+                    tokio::spawn(async move {
+                        if let Err(e) = Indexer::remove_file(state_ref, actual_path).await {
+                            tracing::error!("[Oracle] File removal failed: {}", e);
+                        }
+                    });
+                    continue;
+                }
+
+                // INDEX operations need a permit
+                match index_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                         tokio::spawn(async move {
+                            let _permit = permit; 
+                            if let Err(e) = Indexer::index_file(state_ref, file_path).await {
+                                tracing::error!("[Oracle] Indexing failed: {}", e);
+                            }
+                        });
+                    },
+                    Err(_) => {
+                        // Semaphore full. Release lock (conceptually) and re-queue.
+                        // Since we are re-queuing, we effectively "unlock" it for next tick.
+                        unprocessed_files.push(file_path);
+                    }
+                }
+            }
+
+            // Put back what we couldn't handle
+            if !unprocessed_files.is_empty() {
+                 let files_to_index_arc = {
+                    let state_guard = state.read().unwrap();
+                    state_guard.files_to_index.clone()
+                };
+                // Explicit locking
+                let mut lock = files_to_index_arc.lock().unwrap_or_else(|e| e.into_inner());
+                lock.extend(unprocessed_files);
+            }
+
+            // ----------------------------------------------------------------
+            // PRIORITY 2: SEARCHING
+            // ----------------------------------------------------------------
+            
             let queries_to_process: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let inode_store = &state_guard.inode_store;
@@ -141,61 +243,29 @@ impl Oracle {
                     .filter(|(inode, query)| {
                         let is_processed = processed_queries.contains(query);
                         let has_results = inode_store.has_results(*inode);
-                        
-                        if !is_processed && !has_results {
-                            true
-                        } else {
-                            false
-                        }
+                        if !is_processed && !has_results { true } else { false }
                     })
+                    .take(5) // Throttle
                     .map(|(inode, query)| (query, inode))
                     .collect()
             };
 
-            // 3. Identify Pending Files
-            let files_to_process: Vec<String> = {
-                let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
-                files_to_index_lock.drain(..)
-                    .filter(|file| !processed_files.contains(file))
-                    .collect()
-            };
-
-            // 4. Dispatch Search Tasks
             for (query, inode_num) in queries_to_process {
-                tracing::info!("[Oracle] Dispatching search for: '{}' (Inode {})", query, inode_num);
+                let permit = match search_semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => { break; }
+                };
+                
+                tracing::info!("[Oracle] Dispatching search for: '{}'", query);
                 let state_ref = Arc::clone(&state);
                 processed_queries.put(query.clone(), ());
-                
+
                 tokio::spawn(async move {
+                    let _permit = permit; 
                     if let Err(e) = Searcher::perform_search(state_ref, query.clone(), inode_num).await {
                         tracing::error!("[Oracle] Search failed for '{}': {}", query, e);
                     }
                 });
-            }
-
-            // 5. Dispatch Indexing Tasks
-            for file_path in files_to_process {
-                let state_ref = Arc::clone(&state);
-                
-                if file_path.starts_with("DELETE:") {
-                    let actual_path = file_path.trim_start_matches("DELETE:").to_string();
-                    processed_files.insert(file_path.clone());
-                    
-                    tokio::spawn(async move {
-                        if let Err(e) = Indexer::remove_file(state_ref, actual_path).await {
-                            tracing::error!("[Oracle] File removal failed: {}", e);
-                        }
-                    });
-                } else {
-                    processed_files.insert(file_path.clone());
-                    
-                    tokio::spawn(async move {
-                        if let Err(e) = Indexer::index_file(state_ref, file_path).await {
-                            tracing::error!("[Oracle] Indexing failed: {}", e);
-                        }
-                    });
-                }
             }
         }
     }

@@ -31,29 +31,72 @@ class MagicTest:
         print("---------------------------------------------------\n")
 
     def create_file(self, rel_path, content):
-        """Creates a file in the watch directory."""
         full_path = os.path.join(self.watch_dir, rel_path)
         dir_name = os.path.dirname(full_path)
-        
         if not os.path.exists(dir_name):
             os.makedirs(dir_name, exist_ok=True)
             time.sleep(0.2) 
-
         with open(full_path, "w") as f:
             f.write(content)
         print(f"[Setup] Created file: {rel_path}")
 
     def add_ignore_rule(self, rule):
-        """Appends a rule to .magicfsignore."""
         ignore_path = os.path.join(self.watch_dir, ".magicfsignore")
         with open(ignore_path, "a") as f:
             f.write(f"\n{rule}\n")
         print(f"[Setup] Added ignore rule: {rule}")
         time.sleep(0.5)
 
+    def get_db_count(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT count(*) FROM file_registry")
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result else 0
+        except:
+            return 0
+
+    # THE NEW "MOTION DETECTOR" FUNCTION
+    def wait_for_stable_db(self, stability_duration=3, max_wait=120):
+        """
+        Polls the DB. 
+        If count is increasing, we keep waiting (resetting the stable timer).
+        If count stays the same for 'stability_duration' seconds, we assume conveyor is empty.
+        """
+        print("[Sensor] Monitoring conveyor belt (DB activity)...")
+        last_count = -1
+        stable_start = None
+        start_time = time.time()
+
+        while time.time() - start_time < max_wait:
+            current_count = self.get_db_count()
+            
+            if current_count != last_count:
+                # Conveyor is moving!
+                if last_count != -1:
+                    print(f"  [Moving] Processed {current_count} files...")
+                last_count = current_count
+                stable_start = None # Reset stable timer
+            else:
+                # Conveyor looks stopped. How long has it been stopped?
+                if stable_start is None:
+                    stable_start = time.time()
+                
+                elapsed_stable = time.time() - stable_start
+                if elapsed_stable >= stability_duration:
+                    print(f"  [Stopped] DB stable at {current_count} files for {stability_duration}s.")
+                    return True
+            
+            time.sleep(0.5)
+        
+        print("❌ Timeout waiting for DB to stabilize.")
+        return False
+
     def wait_for_indexing(self, filename_substr, timeout=10):
-        """Polls DB until file appears."""
-        print(f"[Wait] Waiting for '{filename_substr}' to be indexed...")
+        # We wrap the smart waiter first, then do a quick check
+        print(f"[Wait] Waiting for '{filename_substr}'...")
         start = time.time()
         while time.time() - start < timeout:
             if self.check_file_in_db(filename_substr):
@@ -84,8 +127,10 @@ class MagicTest:
         self.dump_logs()
         sys.exit(1)
 
+    # RESTORED MISSING FUNCTION
     def assert_file_not_indexed(self, filename_substr):
-        time.sleep(1) 
+        # We wait a moment to ensure any pending ops would have finished
+        time.sleep(1.0)
         if self.check_file_in_db(filename_substr):
             print(f"❌ FAILURE: Should ignore '{filename_substr}', but found it in DB.")
             self.dump_logs()

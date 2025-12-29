@@ -5,6 +5,7 @@ use crate::storage::Repository;
 use crate::engine::request_embedding;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::io;
 
 pub struct Indexer;
 
@@ -19,7 +20,16 @@ impl Indexer {
         tracing::info!("[Indexer] Processing: {}", file_path);
         
         // 1. Extraction (with retries for file locks AND partial writes)
-        let text_content = Self::extract_with_retry(&file_path).await?;
+        // Hardening: Handle Permission Denied gracefully inside this function
+        let text_content = match Self::extract_with_retry(&file_path).await {
+            Ok(t) => t,
+            Err(MagicError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
+                tracing::warn!("[Indexer] Permission denied: {}. Skipping.", file_path);
+                return Ok(());
+            },
+            Err(e) => return Err(e),
+        };
+
         if text_content.trim().is_empty() {
             tracing::debug!("[Indexer] Skipping empty or binary file: {}", file_path);
             return Ok(());
@@ -75,6 +85,17 @@ impl Indexer {
     }
 
     pub async fn remove_file(state: SharedState, file_path: String) -> Result<()> {
+        // ====================================================================
+        // THE ARBITRATOR (Reality Check)
+        // ====================================================================
+        // Before we delete anything, we check if the file actually exists.
+        // If the "Delete" ticket is outdated and the file is actually there,
+        // we shred the delete ticket and run an Index job instead.
+        if std::path::Path::new(&file_path).exists() {
+            tracing::warn!("[Arbitrator] Delete request for '{}' rejected - file exists on disk. Re-indexing instead.", file_path);
+            return Self::index_file(state, file_path).await;
+        }
+
         {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
@@ -100,8 +121,6 @@ impl Indexer {
             let path_owned = path.to_string();
             
             // Check metadata size first
-            // CRITICAL FIX: If size is 0, we treat it as a "Retry" condition, not a success.
-            // Files are often created as 0 bytes before content is flushed.
             if let Ok(m) = std::fs::metadata(path) {
                 if m.len() == 0 { 
                     if attempt < max_retries {
@@ -109,10 +128,11 @@ impl Indexer {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     } else {
-                        // Truly empty file after 10 attempts (500ms)
                         return Ok(String::new());
                     }
                 }
+            } else if attempt == 1 {
+                // If we can't even get metadata on first attempt, might be permission denied immediately
             }
 
             let result = tokio::task::spawn_blocking(move || {
@@ -124,9 +144,11 @@ impl Indexer {
                     if !content.trim().is_empty() { 
                         return Ok(content); 
                     }
-                    // If content is empty (but size wasn't 0?), it might be binary or just whitespace.
-                    // We can accept it, but if it was a read error, we retry.
                 },
+                Err(MagicError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
+                    // Fail fast on permission denied, do not retry
+                    return Err(MagicError::Io(e));
+                }
                 Err(e) => {
                     last_error = Some(e);
                 }

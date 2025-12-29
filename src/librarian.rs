@@ -72,9 +72,8 @@ impl Librarian {
         let mut ignore_manager = IgnoreManager::new();
         for path_str in &paths_vec { ignore_manager.load_rules_for_root(Path::new(path_str)); }
 
-        // Core Foundation: Purge then Scan
+        // Initial Scan
         let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
-
         for path_str in &paths_vec {
             let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
         }
@@ -83,7 +82,8 @@ impl Librarian {
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default()).unwrap();
         for path in &paths_vec { let _ = watcher.watch(Path::new(path), RecursiveMode::Recursive); }
 
-        let debounce = Duration::from_millis(200);
+        // Hardening: Increased debounce to 500ms to allow FS operations (Delete/Create cycles) to settle
+        let debounce = Duration::from_millis(500);
         let mut event_queue: HashMap<PathBuf, Event> = HashMap::new();
         let mut last_activity = Instant::now();
 
@@ -99,7 +99,7 @@ impl Librarian {
                     if !event_queue.is_empty() && last_activity.elapsed() >= debounce {
                         let events = std::mem::take(&mut event_queue);
                         
-                        // PRIORITIZE IGNORE RULES
+                        // 1. Load Ignore Rules First
                         for (path, _) in &events {
                             if path.file_name().map_or(false, |n| n == ".magicfsignore") {
                                 for root_str in &paths_vec {
@@ -108,6 +108,7 @@ impl Librarian {
                             }
                         }
 
+                        // 2. Process Events
                         for (_path, event) in events { 
                             let _ = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec);
                         }
@@ -142,7 +143,18 @@ impl Librarian {
         let files_to_index_arc = Arc::clone(&state_guard.files_to_index);
 
         let mut queue_batch = Vec::new();
-        for entry in walkdir::WalkDir::new(dir_path).into_iter().filter_entry(|e| !ignore_manager.is_ignored(e.path(), watch_roots)) {
+        
+        // Hardening: Explicitly handle Symlinks. 
+        for entry in walkdir::WalkDir::new(dir_path)
+            .follow_links(false) // Safety switch
+            .into_iter()
+            .filter_entry(|e| {
+                if e.path_is_symlink() {
+                    return false; 
+                }
+                !ignore_manager.is_ignored(e.path(), watch_roots)
+            }) 
+        {
             if let Ok(entry) = entry {
                 let path = entry.path();
                 if path.is_file() {
@@ -170,13 +182,30 @@ impl Librarian {
                 let guard = state.read().unwrap();
                 guard.files_to_index.clone()
             };
-            let mut queue = files_to_index.lock().unwrap();
+            
+            // Hardening: Use explicit lock handling
+            let mut queue = files_to_index.lock().unwrap_or_else(|e| e.into_inner());
+
             for path in &event.paths {
                 if ignore_manager.is_ignored(path, watch_roots) { continue; }
+                
+                // Hardening: Check if symlink before queuing
+                if path.is_symlink() {
+                    continue; 
+                }
+
                 let path_str = path.to_string_lossy().to_string();
                 match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => { if path.is_file() { queue.push(path_str); } }
-                    EventKind::Remove(_) => { queue.push(format!("DELETE:{}", path_str)); }
+                    EventKind::Create(_) | EventKind::Modify(_) => { 
+                        if path.is_file() { 
+                            tracing::debug!("[Librarian] Queueing index: {}", path_str);
+                            queue.push(path_str); 
+                        } 
+                    }
+                    EventKind::Remove(_) => { 
+                        tracing::debug!("[Librarian] Queueing delete: {}", path_str);
+                        queue.push(format!("DELETE:{}", path_str)); 
+                    }
                     _ => {}
                 }
             }
