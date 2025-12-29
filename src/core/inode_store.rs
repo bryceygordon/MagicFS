@@ -1,6 +1,9 @@
 // FILE: src/core/inode_store.rs
 use dashmap::DashMap;
 use crate::state::SearchResult;
+use lru::LruCache;
+use std::sync::Mutex;
+use std::num::NonZeroUsize;
 
 /// InodeStore: The Authority on "What exists in the filesystem"
 /// 
@@ -17,7 +20,8 @@ pub struct InodeStore {
     inode_to_query: DashMap<u64, String>,
 
     /// Storage: Inode -> Search Results
-    results: DashMap<u64, Vec<SearchResult>>,
+    /// Managed via LRU to prevent memory bloat
+    results: Mutex<LruCache<u64, Vec<SearchResult>>>,
 }
 
 impl Default for InodeStore {
@@ -31,7 +35,8 @@ impl InodeStore {
         Self {
             query_to_inode: DashMap::new(),
             inode_to_query: DashMap::new(),
-            results: DashMap::new(),
+            // Capacity: 50 active search queries.
+            results: Mutex::new(LruCache::new(NonZeroUsize::new(50).unwrap())),
         }
     }
 
@@ -54,22 +59,26 @@ impl InodeStore {
 
     /// Retrieve search results for a given inode
     pub fn get_results(&self, inode: u64) -> Option<Vec<SearchResult>> {
-        self.results.get(&inode).map(|r| r.clone())
+        let mut cache = self.results.lock().unwrap();
+        cache.get(&inode).cloned()
     }
 
     /// Store results for a given inode
     pub fn put_results(&self, inode: u64, results: Vec<SearchResult>) {
-        self.results.insert(inode, results);
+        let mut cache = self.results.lock().unwrap();
+        cache.put(inode, results);
     }
 
     /// Check if results exist (fast check for EAGAIN logic)
     pub fn has_results(&self, inode: u64) -> bool {
-        self.results.contains_key(&inode)
+        let cache = self.results.lock().unwrap();
+        cache.contains(&inode)
     }
 
     /// Clear all results (cache invalidation)
     pub fn clear_results(&self) {
-        self.results.clear();
+        let mut cache = self.results.lock().unwrap();
+        cache.clear();
     }
 
     /// Get all active queries (for readdir on /search)

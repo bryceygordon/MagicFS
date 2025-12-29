@@ -19,6 +19,8 @@ use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use anyhow;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 pub struct Oracle {
     pub state: SharedState,
@@ -74,10 +76,17 @@ impl Oracle {
 
             while let Some(request) = rx.blocking_recv() {
                 let EmbeddingRequest { content, respond_to } = request;
+                
+                // Diagnostic logging
+                tracing::debug!("[EmbeddingActor] Embedding '{}'...", content.chars().take(20).collect::<String>());
+
                 let result = model.embed(vec![content], None)
                     .map(|mut res| res.remove(0))
                     .map_err(|e| MagicError::Embedding(format!("FastEmbed error: {}", e)));
-                let _ = respond_to.send(result);
+                
+                if let Err(_) = respond_to.send(result) {
+                    tracing::warn!("[EmbeddingActor] Receiver dropped!");
+                }
             }
             tracing::info!("[EmbeddingActor] Shutting down");
         });
@@ -102,7 +111,8 @@ impl Oracle {
             return;
         }
 
-        let mut processed_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Use LRU to prevent infinite history growth
+        let mut processed_queries = LruCache::new(NonZeroUsize::new(1000).unwrap());
         let mut processed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_index_version = 0;
 
@@ -116,20 +126,27 @@ impl Oracle {
             };
 
             if current_index_version != last_index_version {
-                tracing::debug!("[Oracle] Index version changed. Resetting processed_queries.");
+                tracing::debug!("[Oracle] Index version changed ({} -> {}). Resetting processed_queries.", last_index_version, current_index_version);
                 processed_queries.clear();
-                
-                // Note: The InodeStore is cleared by the Indexer, but we ensure consistency here
                 last_index_version = current_index_version;
             }
 
             // 2. Identify Pending Searches
             let queries_to_process: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                state_guard.inode_store.active_queries()
+                let inode_store = &state_guard.inode_store;
+                
+                inode_store.active_queries()
                     .into_iter()
                     .filter(|(inode, query)| {
-                        !processed_queries.contains(query) && !state_guard.inode_store.has_results(*inode)
+                        let is_processed = processed_queries.contains(query);
+                        let has_results = inode_store.has_results(*inode);
+                        
+                        if !is_processed && !has_results {
+                            true
+                        } else {
+                            false
+                        }
                     })
                     .map(|(inode, query)| (query, inode))
                     .collect()
@@ -146,12 +163,13 @@ impl Oracle {
 
             // 4. Dispatch Search Tasks
             for (query, inode_num) in queries_to_process {
+                tracing::info!("[Oracle] Dispatching search for: '{}' (Inode {})", query, inode_num);
                 let state_ref = Arc::clone(&state);
-                processed_queries.insert(query.clone());
+                processed_queries.put(query.clone(), ());
                 
                 tokio::spawn(async move {
-                    if let Err(e) = Searcher::perform_search(state_ref, query, inode_num).await {
-                        tracing::error!("[Oracle] Search failed: {}", e);
+                    if let Err(e) = Searcher::perform_search(state_ref, query.clone(), inode_num).await {
+                        tracing::error!("[Oracle] Search failed for '{}': {}", query, e);
                     }
                 });
             }

@@ -1,18 +1,38 @@
 #!/bin/bash
 
+# ==================================================================================
+# ⚠️  CRITICAL TERMINAL CONTROL SECTION - DO NOT REMOVE OR MODIFY  ⚠️
+# ==================================================================================
+# The following block prevents "laddering" (stair-step output) which renders
+# logs unreadable. It saves the TTY state before tests run and FORCES restoration
+# upon any exit signal.
+#
+# DO NOT DELETE 'SAVED_TERM' OR THE TRAP FUNCTION.
+# DO NOT RELY ON 'reset' (It clears the scrollback, hiding debug info).
+# ==================================================================================
+
+# 1. Save the current sane terminal state
+SAVED_TERM=$(stty -g)
+
+# 2. Define the restoration function
+restore_term() {
+    # Silence errors in case TTY is already gone
+    stty "$SAVED_TERM" 2>/dev/null
+}
+
+# 3. Trap EVERYTHING. If this script dies, the terminal MUST be restored.
+trap restore_term EXIT INT TERM HUP
+
+# ==================================================================================
+# END CRITICAL SECTION
+# ==================================================================================
+
 # Configuration
 MOUNT_POINT="/tmp/magicfs-test-mount"
 WATCH_DIR="/tmp/magicfs-test-data"
 DB_PATH="/tmp/.magicfs/index.db"
 BINARY="./target/debug/magicfs"
 LOG_FILE="tests/magicfs.log"
-
-# Violent reset to kill laddering
-reset_term() {
-    # 'reset' is the nuclear option for terminal garbling
-    reset -Q 2>/dev/null || stty sane
-}
-trap reset_term EXIT
 
 cleanup() {
     set +e
@@ -36,7 +56,6 @@ cleanup() {
     sudo rm -f "$DB_PATH" 2>/dev/null
     sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" 2>/dev/null
     
-    reset_term
     set -e
 }
 
@@ -61,22 +80,24 @@ sleep 2
 export PYTHONPATH=$PYTHONPATH:$(pwd)/tests
 
 for test_file in tests/cases/*.py; do
-    # Before every test, ensure terminal is sane
-    reset_term
+    # Force restore before every test just in case the previous one leaked state
+    restore_term
+    
     echo -e "\n>>> Running: $(basename "$test_file")"
-    python3 "$test_file" "$DB_PATH" "$MOUNT_POINT" "$WATCH_DIR"
+    
+    # Run python unbuffered (-u) to ensure logs flow immediately
+    python3 -u "$test_file" "$DB_PATH" "$MOUNT_POINT" "$WATCH_DIR"
     RESULT=$?
     
     if [ $RESULT -ne 0 ]; then
-        reset_term
+        restore_term
         echo -e "\n❌ TEST FAILED: $(basename "$test_file")"
-        echo "--- LOG SUMMARY ---"
+        echo "--- LOG SUMMARY (Last 100 lines) ---"
         if [ -f "$LOG_FILE" ]; then
-            tail -n 50 "$LOG_FILE" | uniq -c
+            tail -n 100 "$LOG_FILE"
         fi
         exit 1
     fi
 done
 
-reset_term
 echo -e "\n✅ ALL TESTS PASSED"
