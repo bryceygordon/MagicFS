@@ -12,16 +12,16 @@ The "Three-Organ" architecture is stable. We can index files, search them semant
 | **HollowDrive** | ✅ Stable | Respects 10ms law. |
 | **Librarian** | ✅ Stable | Robust ignore rules & debouncing. |
 | **Oracle** | 🟡 Refactoring | Moving from "Whole File" to "Chunked" embeddings. |
-| **Storage** | 🟡 Migrating | Schema update required for 1-to-Many (File-to-Chunks). |
+| **Storage** | 🟡 Migrating | Adding binary detection and size limits. |
 
 ## ⚠️ Known Vulnerabilities (Focus of Phase 6)
 
 1. **Semantic Dilution**: Large files have poor search relevance because they are embedded as a single blob.
-   * *Fix:* Implementing Sliding Window Chunking.
+   * *Fix:* Implementing Sliding Window Chunking (Upcoming).
 2. **Memory Risk ("The Slurp")**: Reading large files into memory causes OOM.
-   * *Fix:* Implementing Streaming Read with Hard Caps (10MB).
-3. **Binary Hazards**: No robust check for binary files (e.g., `.png`, compiled binaries) before reading.
-   * *Fix:* Content inspection (null byte check).
+   * *Fix:* Implemented 10MB Hard Cap.
+3. **Binary Hazards**: No robust check for binary files (e.g., `.png`, compiled binaries).
+   * *Fix:* Implemented Null Byte Detection.
 
 ## 🧪 Test Suite Metrics
 
@@ -33,5 +33,5 @@ The "Three-Organ" architecture is stable. We can index files, search them semant
 
 ## 📅 Immediate Next Actions
 
-1. **Database Migration**: Update `vec_index` to link to `file_registry` via foreign key, allowing multiple embeddings per file.
-2. **Refactor Extractor**: Rewrite `src/storage/text_extraction.rs` to yield an Iterator of strings (chunks) rather than one String.
+1. **Refactor Extractor**: Rewrite `src/storage/text_extraction.rs` to enforce safety limits.
+2. **Chunking**: Implement sliding window logic for text splitting.

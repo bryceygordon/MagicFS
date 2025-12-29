@@ -47,12 +47,11 @@ We assume the filesystem is hostile. Files will be huge, permissions will be den
 **Goal:** Solve "Semantic Dilution" and prevent "The Slurp" (OOM crashes).
 
 **Micro-Steps:**
-1. [ ] **Chunking Architecture**: Refactor `text_extraction` and `vec_index` to support 1-to-Many relationship (1 File = N Chunks).
-2. [ ] **Streaming Extraction**: Replace `read_to_string` with buffered reading to enforce file size limits (e.g., 10MB hard cap).
+1. [x] **Safety Guards**: Implement file size limits (10MB) and binary detection (null byte check).
+2. [ ] **Chunking Architecture**: Refactor `text_extraction` and `vec_index` to support 1-to-Many relationship (1 File = N Chunks).
 3. [ ] **Sliding Window Logic**: Implement text chunking (e.g., 512 tokens with 25% overlap).
 4. [ ] **Search Aggregation**: Update SQL query to aggregate chunk scores into a single file score (e.g., Max Chunk Score strategy).
 5. [ ] **Memory Guardrails**: Add strict limits to the `Oracle`'s embedding channel to prevent queue explosions.
-6. [ ] **Binary Detection**: Improve `text_extraction` to fail fast on binary files (checking first 8kb for null bytes).
 
 ### 🔮 Phase 7: Compatibility & Polish [FUTURE]
 **Goal:** Make MagicFS behave nicely with standard Unix tools.
@@ -68,5 +67,5 @@ We assume the filesystem is hostile. Files will be huge, permissions will be den
 ## 📏 Critical Constraints
 
 1. **The 10ms Law**: FUSE ops must never block >10ms.
-2. **Memory Cap**: The system should never exceed ~500MB RAM for a medium repo (tracked via Chunking limits).
+2. **Memory Cap**: The system should never exceed ~500MB RAM for a medium repo.
 3. **Graceful Degradation**: If a file can't be read/embedded, the system continues; the file is simply omitted from search.
