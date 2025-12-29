@@ -15,40 +15,44 @@ It operates on the philosophy that **"The Filesystem is the Interface."** Users 
 
 ---
 
-## 🛡️ Era 3: Utility [ACTIVE]
+## 🏗️ Era 2: Scalability [ACTIVE]
 
-### 🔮 Phase 7: The Universal Reader (Current Priority)
+### 🚧 Phase 6.5: The Foundation (Stability & Scalability) [CURRENT]
+**Goal:** Fix structural flaws that prevent scaling to 10,000+ files. Ensure the system survives restarts and long uptimes without burning CPU or RAM.
+
+1.  **The "Startup Storm" (Incremental Indexing)**:
+    * **Problem:** Currently, MagicFS re-indexes *every* file on startup.
+    * **Solution:** Implement `mtime` comparison. Only re-embed if the file has changed since the last DB write.
+2.  **The "Zombie File" (State Consistency)**:
+    * **Problem:** Files deleted or added to `.magicfsignore` stay in the index forever.
+    * **Solution:** Implement a "Purge" routine on startup and during ignore-file updates to remove orphaned entries.
+3.  **The "Memory Leak" (LRU Eviction)**:
+    * **Problem:** `InodeStore` grows indefinitely.
+    * **Solution:** Implement an LRU (Least Recently Used) Cache for search inodes. Cap at ~100 active queries.
+4.  **The Stress Test**:
+    * **Metric:** System must handle a repository of 1,000 files with <500MB RAM usage and <5s startup time.
+
+---
+
+## 🛡️ Era 3: Utility [PLANNED]
+
+### 🔮 Phase 7: The Universal Reader
 **Goal:** Break the "Format Barrier". Users store high-value knowledge in PDFs and DOCX, not just `.txt`. MagicFS must read them all.
 
-1.  **Rich Media Ingestion**:
-    * Integrate `pdf-extract` for PDFs.
-    * Integrate `dotext` for Office Documents (DOCX/XLSX).
-    * *Success Metric:* `test_06_rich_media.py` finds a "needle" text inside a PDF file.
-2.  **Contextual Visibility (`_CONTEXT.md`)**:
-    * **Problem:** Semantic search finds *concepts*, not exact keywords, making Ctrl+F useless.
-    * **Solution:** Every search directory contains a generated `_CONTEXT.md` file.
-    * **Function:** This file aggregates the specific text snippets (sentences/paragraphs) that triggered the match, allowing users to verify relevance instantly.
+1.  **Rich Media Ingestion**: PDF and Office Document support.
+2.  **Contextual Visibility (`_CONTEXT.md`)**: Exposing *why* a file matched.
 
-### 🔮 Phase 8: Aggregation & Persistence (Next Up)
+### 🔮 Phase 8: Aggregation & Persistence
 **Goal:** Transform from "Single Folder Watcher" to "System-Wide Aggregator".
 
-1.  **Multi-Root Support (The "Sources" Directory)**:
-    * **Feature:** Expose a virtual directory `/sources`.
-    * **Interface:** Users add watch paths via standard symlink: `ln -s ~/Obsidian /mountpoint/sources/notes`.
-    * **Backend:** Librarian upgrades to handle multiple, dynamic `notify` watchers.
-2.  **Saved Views (Workflows)**:
-    * **Feature:** Expose a virtual directory `/saved`.
-    * **Interface:** Users create persistent smart folders via mkdir: `mkdir /mountpoint/saved/ProjectApollo`.
-    * **Configuration:** Users define the query by writing to a hidden file: `echo "apollo specs" > /mountpoint/saved/ProjectApollo/.query`.
-3.  **State vs. Cache Separation (Backup Strategy)**:
-    * **State (Precious)**: `~/.config/magicfs/` stores `sources.json` and `views.json`. This is small and must be backed up.
-    * **Cache (Disposable)**: `~/.cache/magicfs/` stores `index.db`. This is heavy and can be rebuilt if lost.
+1.  **Multi-Root Support**: `/sources` directory for symlinking external paths.
+2.  **Saved Views**: Persistent queries via `/saved` directory.
+3.  **XDG Compliance**: Separate config (`~/.config`) from cache (`~/.cache`).
 
 ---
 
 ## 📏 Critical Constraints
 
 1.  **The 10ms Law**: FUSE ops must never block >10ms.
-2.  **Memory Cap**: ~500MB RAM. (Parsing PDFs is memory-intensive; we must stream or chunk aggressively).
-3.  **Dependency Weight**: Avoid `libpoppler` if possible, but prioritize correctness for Phase 7.
-4.  **Zero Config**: Adding a source happens via the filesystem (`ln -s`), not a YAML file.
+2.  **The 500MB Cap**: RAM usage must remain stable regardless of file count.
+3.  **Zero Config**: Configuration via filesystem operations only.

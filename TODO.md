@@ -1,76 +1,56 @@
-* [x] **Charter**: Establish `CHARTER.md` to guide architectural decisions.
-* [x] **Roadmap**: Update `ROADMAP.md` with Phase 6 (Refactor) and Phase 7 (Hardening).
-* [x] **Phase 6.1: The Repository**:
-    * [x] Create `src/storage/repository.rs`.
-    * [x] Move `init_connection` and SQL schemas here.
-    * [x] Move `file_registry` CRUD ops here.
-    * [x] Move `search` SQL logic here.
-    * [x] *Check:* Run `tests/run_suite.sh`.
+# MagicFS Task List
 
-* [x] **Phase 6.2: The InodeStore**:
-    * [x] Create `src/core/inode_store.rs`.
-    * [x] Move `active_searches` and `search_results` from `state.rs`.
-    * [x] Update `HollowDrive` to read from `InodeStore`.
-    * [x] Update `Oracle` to write to `InodeStore`.
-    * [x] *Check:* Run `tests/run_suite.sh`.
+## ✅ Completed Phases
+* [x] **Phases 1-5**: Foundation, FUSE Loop, Basic Search.
+* [x] **Phase 6**: Hardening, Binary Safety, Chunking.
 
-* [x] **Phase 6.3: Engine Extraction**:
-    * [x] Create `src/engine/` module.
-    * [x] Extract `Indexer` (File I/O -> Chunking -> DB).
-    * [x] Extract `Searcher` (Embedding -> DB -> InodeStore).
-    * [x] Refactor `Oracle` to be a lightweight Orchestrator.
-    * [x] *Check:* Run `tests/run_suite.sh`.
+---
 
+## 🚧 Phase 6.5: The Foundation [ACTIVE]
 
+**Objective:** Scale to 10k files and 1 week uptime without crashing or freezing.
 
-## Phase 7: The Universal Reader [ACTIVE]
+### 6.5.1: Incremental Indexing (Stop the Storm)
+* [ ] **DB Update**: Ensure `mtime` is accurately stored in `file_registry`.
+* [ ] **Librarian Logic**:
+    * [ ] Modify `scan_directory_for_files` to query the DB for the file's current `mtime`.
+    * [ ] If `fs_mtime == db_mtime`, skip queuing.
+    * [ ] Log skipped files as `DEBUG` only (reduce log noise).
+* [ ] **Check**: Restarting the daemon on a watched folder should result in **0** embedding operations.
 
-**Objective:** Enable MagicFS to read PDF/DOCX files and expose "Why it matched" snippets.
+### 6.5.2: State Consistency (Kill Zombies)
+* [ ] **The Purge**:
+    * [ ] Implement `Repository::get_all_files()`.
+    * [ ] On startup, iterate all DB files. If `!Path::exists()`, delete from DB.
+* [ ] **Retroactive Ignore**:
+    * [ ] When `.magicfsignore` changes, trigger a scan.
+    * [ ] If a file currently in DB matches a *new* ignore rule, delete it from DB.
 
-* [ ] **7.1: Dependency Integration**
-    * [ ] Add `pdf-extract` (or `lopdf`) to `Cargo.toml`.
-    * [ ] Add `dotext` (or `zip` + `xml-rs`) to `Cargo.toml`.
-    * [ ] *Check:* `cargo build` passes without massive bloat.
+### 6.5.3: Memory Hygiene (LRU)
+* [ ] **InodeStore Refactor**:
+    * [ ] Replace `DashMap` for `results` with `moka` or a custom `Mutex<LruCache>`.
+    * [ ] Set capacity to ~50-100 queries.
+* [ ] **Oracle Cache**:
+    * [ ] Ensure `processed_queries` set doesn't grow infinitely (clear it periodically or use LRU).
 
-* [ ] **7.2: Refactor Extractor**
-    * [ ] Modify `src/storage/text_extraction.rs` to route by extension.
-    * [ ] Implement `extract_pdf(path: &Path) -> Result<String>`.
-    * [ ] Implement `extract_office(path: &Path) -> Result<String>`.
-    * [ ] Ensure "Fail First" checks (Size > 10MB) apply *before* parsing starts.
+### 6.5.4: Stress Testing
+* [ ] **Script**: Create `tests/cases/test_00_stress.py`.
+    * [ ] Generate 1,000 small text files.
+    * [ ] Measure time to index.
+    * [ ] Restart daemon.
+    * [ ] Measure time to "ready" (should be near instant).
+    * [ ] Delete 500 files.
+    * [ ] Verify DB size decreases.
 
-* [ ] **7.3: Contextual Snippets (`_CONTEXT.md`)**
-    * [ ] Update `SearchResult` struct in `state.rs` to include `snippets: Vec<String>`.
-    * [ ] Update `Repository::search` SQL query to return the text content of the best matching chunks (not just the file ID).
-    * [ ] Update `HollowDrive::lookup` to handle `_CONTEXT.md`.
-    * [ ] Update `HollowDrive::read` to generate the Markdown report on the fly.
+---
 
-* [ ] **7.4: Testing**
-    * [ ] Create `tests/cases/test_06_rich_media.py`.
-    * [ ] Mock a PDF file (or check in a tiny test PDF).
-    * [ ] Verify the search finds text inside the binary format.
-    * [ ] Verify `_CONTEXT.md` exists and contains the expected snippets.
+## 🔮 Phase 7: The Universal Reader [PENDING]
 
-## Phase 8: Aggregation & Persistence (Planned)
+* [ ] **Dependency Integration**: `pdf-extract`, `dotext`.
+* [ ] **Refactor Extractor**: Route by extension.
+* [ ] **Snippet Generation**: `_CONTEXT.md` generation logic.
 
-**Objective:** Support multi-root watching and XDG-compliant state persistence.
+## 🔮 Phase 8: Aggregation [PENDING]
 
-* [ ] **8.1: State Management (The "Precious" Data)**
-    * [ ] Create `src/config.rs` to handle loading/saving `sources.json` and `views.json`.
-    * [ ] Implement XDG Base Directory logic (`~/.config/magicfs` vs `~/.cache/magicfs`).
-    * [ ] Ensure `index.db` is moved to the cache directory.
-
-* [ ] **8.2: The Librarian Upgrade**
-    * [ ] Refactor `Librarian` to hold a `HashMap<PathBuf, Watcher>` instead of a single watcher.
-    * [ ] Implement `add_source(path)` and `remove_source(path)` methods.
-    * [ ] Ensure existing index entries are purged when a source is removed.
-
-* [ ] **8.3: The Virtual Interface**
-    * [ ] Update `HollowDrive` to expose `/sources` (Virtual Directory).
-    * [ ] Implement `symlink` syscall in `HollowDrive` to trigger `Librarian::add_source`.
-    * [ ] Implement `unlink` syscall in `HollowDrive` to trigger `Librarian::remove_source`.
-    * [ ] Implement `mkdir` in `/saved` to trigger View creation.
-
-* [ ] **8.4: Testing Persistence**
-    * [ ] Create `tests/cases/test_07_multiroot.py`.
-    * [ ] Verify adding a source via symlink starts indexing immediately.
-    * [ ] Verify restarting the daemon restores the sources from config.
+* [ ] **Config**: `~/.config/magicfs/sources.json`.
+* [ ] **Virtual Dirs**: `/sources` and `/saved` endpoints.
