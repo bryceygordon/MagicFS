@@ -11,20 +11,20 @@
 **Objective:** Scale to 10k files and 1 week uptime without crashing or freezing.
 
 ### 6.5.1: Incremental Indexing (Stop the Storm)
-* [ ] **DB Update**: Ensure `mtime` is accurately stored in `file_registry`.
-* [ ] **Librarian Logic**:
-    * [ ] Modify `scan_directory_for_files` to query the DB for the file's current `mtime`.
-    * [ ] If `fs_mtime == db_mtime`, skip queuing.
-    * [ ] Log skipped files as `DEBUG` only (reduce log noise).
-* [ ] **Check**: Restarting the daemon on a watched folder should result in **0** embedding operations.
+* [x] **DB Update**: Ensure `mtime` is accurately stored in `file_registry`.
+* [x] **Librarian Logic**:
+    * [x] Modify `scan_directory_for_files` to query the DB for the file's current `mtime`.
+    * [x] If `fs_mtime == db_mtime`, skip queuing.
+    * [x] Log skipped files as `DEBUG` only (reduce log noise).
+* [x] **Check**: Restarting the daemon on a watched folder should result in **0** embedding operations.
 
 ### 6.5.2: State Consistency (Kill Zombies)
-* [ ] **The Purge**:
-    * [ ] Implement `Repository::get_all_files()`.
-    * [ ] On startup, iterate all DB files. If `!Path::exists()`, delete from DB.
-* [ ] **Retroactive Ignore**:
-    * [ ] When `.magicfsignore` changes, trigger a scan.
-    * [ ] If a file currently in DB matches a *new* ignore rule, delete it from DB.
+* [x] **The Purge**:
+    * [x] Implement `Repository::get_all_files()`.
+    * [x] On startup, iterate all DB files. If `!Path::exists()`, delete from DB.
+* [x] **Retroactive Ignore**:
+    * [x] When `.magicfsignore` changes, trigger a scan.
+    * [x] If a file currently in DB matches a *new* ignore rule, delete it from DB.
 
 ### 6.5.3: Memory Hygiene (LRU)
 * [ ] **InodeStore Refactor**:
