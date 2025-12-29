@@ -67,15 +67,15 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
             );
         "#)?;
 
-        // Phase 6 Schema: Support multiple chunks per file
+        // Phase 6 Schema: Support multiple chunks per file + Cosine Distance
         conn.execute("DROP TABLE IF EXISTS vec_index", [])?;
         match conn.execute_batch(r#"
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                 file_id INTEGER,          -- Link to file_registry
-                embedding float[384]      -- The vector
+                embedding float[384] distance_metric=cosine
             )
         "#) {
-            Ok(_) => tracing::info!("Created vec_index table (Chunking enabled)"),
+            Ok(_) => tracing::info!("Created vec_index table (Chunking enabled, Cosine Metric)"),
             Err(e) => tracing::warn!("Failed to create vec_index table: {}", e),
         }
 
@@ -83,19 +83,18 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     } else {
         tracing::info!("Loaded existing database");
 
-        // Migration: Ensure vec_index supports chunking (has file_id column)
-        // For development simplicity in Phase 6, we recreate it if needed.
-        // In prod, check PRAGMA table_info('vec_index').
-        tracing::info!("Ensuring vec_index supports chunking...");
+        // Migration: Ensure vec_index uses Cosine Distance
+        // In dev, we just drop and recreate to enforce the metric change.
+        tracing::info!("Ensuring vec_index supports chunking and cosine distance...");
         let _ = conn.execute("DROP TABLE IF EXISTS vec_index", []);
-         
+          
         match conn.execute_batch(r#"
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                 file_id INTEGER,
-                embedding float[384]
+                embedding float[384] distance_metric=cosine
             )
         "#) {
-            Ok(_) => tracing::info!("Recreated vec_index table for Chunking"),
+            Ok(_) => tracing::info!("Recreated vec_index table for Chunking/Cosine"),
             Err(e) => tracing::warn!("Failed to recreate vec_index: {}", e),
         }
     }

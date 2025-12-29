@@ -1,6 +1,7 @@
 // src/state.rs
 
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::AtomicUsize;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -33,6 +34,10 @@ pub struct GlobalState {
 
     /// Queue of file paths waiting for indexing
     pub files_to_index: Arc<std::sync::Mutex<Vec<String>>>,
+
+    /// Version counter for the index/cache state.
+    /// Incremented whenever the index changes and caches are invalidated.
+    pub index_version: Arc<AtomicUsize>,
 }
 
 /// Result of a semantic search operation
@@ -55,6 +60,7 @@ impl Default for GlobalState {
             db_connection: Arc::new(std::sync::Mutex::new(None)),
             embedding_tx: Arc::new(RwLock::new(None)),
             files_to_index: Arc::new(std::sync::Mutex::new(Vec::new())),
+            index_version: Arc::new(AtomicUsize::new(0)),
         }
     }
 }

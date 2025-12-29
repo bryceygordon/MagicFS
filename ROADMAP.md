@@ -41,19 +41,23 @@ We assume the filesystem is hostile. Files will be huge, permissions will be den
 
 ---
 
-## 🛡️ Era 2: Refinement & Hardening (Current)
+## 🛡️ Era 2: Refinement & Hardening (Completed)
 
-### 🔄 Phase 6: Hardening & Resilience [ACTIVE]
+### ✅ Phase 6: Hardening & Resilience
 **Goal:** Solve "Semantic Dilution" and prevent "The Slurp" (OOM crashes).
 
 **Micro-Steps:**
 1. [x] **Safety Guards**: Implement file size limits (10MB) and binary detection (null byte check).
-2. [ ] **Chunking Architecture**: Refactor `text_extraction` and `vec_index` to support 1-to-Many relationship (1 File = N Chunks).
-3. [ ] **Sliding Window Logic**: Implement text chunking (e.g., 512 tokens with 25% overlap).
-4. [ ] **Search Aggregation**: Update SQL query to aggregate chunk scores into a single file score (e.g., Max Chunk Score strategy).
-5. [ ] **Memory Guardrails**: Add strict limits to the `Oracle`'s embedding channel to prevent queue explosions.
+2. [x] **Chunking Architecture**: Refactor `text_extraction` and `vec_index` to support 1-to-Many relationship (1 File = N Chunks).
+3. [x] **Sliding Window Logic**: Implement text chunking (256 chars with 50 char overlap).
+4. [x] **Search Aggregation**: Update SQL query to aggregate chunk scores into a single file score (Max Chunk Score strategy).
+5. [x] **Memory Guardrails**: Add strict limits to the `Oracle`'s embedding channel to prevent queue explosions.
 
-### 🔮 Phase 7: Compatibility & Polish [FUTURE]
+---
+
+## 🔮 Era 3: Polish & Performance [NEXT]
+
+### 🔄 Phase 7: Compatibility & Polish [ACTIVE]
 **Goal:** Make MagicFS behave nicely with standard Unix tools.
 
 **Micro-Steps:**

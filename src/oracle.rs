@@ -11,6 +11,7 @@ use crate::state::{SharedState, SearchResult, EmbeddingRequest};
 use crate::error::{Result, MagicError};
 use tokio::task::JoinHandle;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use rusqlite::{Connection, params};
 use bytemuck;
@@ -103,10 +104,28 @@ impl Oracle {
 
         let mut processed_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut processed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        
+        // Track the version of the index we last saw
+        let mut last_index_version = 0;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+            // 1. Check if Index Version Changed
+            // If the index changed (files added/removed), we wiped the caches.
+            // We must clear `processed_queries` so we retry any active searches.
+            let current_index_version = {
+                let state_guard = state.read().unwrap();
+                state_guard.index_version.load(Ordering::Relaxed)
+            };
+
+            if current_index_version != last_index_version {
+                tracing::debug!("[Oracle] Index version changed ({} -> {}). Resetting processed_queries.", last_index_version, current_index_version);
+                processed_queries.clear();
+                last_index_version = current_index_version;
+            }
+
+            // 2. Process Searches
             let queries_to_process: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 state_guard.active_searches.iter()
@@ -122,6 +141,7 @@ impl Oracle {
                     .collect()
             };
 
+            // 3. Process Files
             let files_to_process: Vec<String> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
@@ -130,11 +150,12 @@ impl Oracle {
                     .collect()
             };
 
-            for (query, _inode_num) in queries_to_process {
+            for (query, inode_num) in queries_to_process {
+                tracing::debug!("[Oracle] Picked up query: '{}' (inode: {})", query, inode_num);
                 let state_to_process = Arc::clone(&state);
                 processed_queries.insert(query.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = Oracle::process_search_query(state_to_process, query).await {
+                    if let Err(e) = Oracle::process_search_query(state_to_process, query, inode_num).await {
                         tracing::error!("[Oracle] Error processing search: {}", e);
                     }
                 });
@@ -162,19 +183,25 @@ impl Oracle {
         }
     }
 
-    async fn process_search_query(state: SharedState, query: String) -> Result<()> {
+    async fn process_search_query(state: SharedState, query: String, expected_inode: u64) -> Result<()> {
         let results = Oracle::perform_vector_search(state.clone(), query.clone()).await?;
 
-        let inode_num = {
+        // Verify inode is still valid
+        let current_inode = {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             state_guard.active_searches.get(&query)
                 .map(|v| *v.value())
                 .ok_or_else(|| MagicError::State("Query not found".into()))?
         };
+        
+        if current_inode != expected_inode {
+             tracing::warn!("[Oracle] Inode mismatch for query '{}'. Expected: {}, Found: {}. Updating anyway.", query, expected_inode, current_inode);
+        }
 
         {
             let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            state_guard.search_results.insert(inode_num, results);
+            state_guard.search_results.insert(current_inode, results);
+            tracing::info!("[Oracle] Stored results for query '{}' under inode {}", query, current_inode);
         }
         Ok(())
     }
@@ -299,12 +326,14 @@ impl Oracle {
     fn invalidate_caches_after_index(state: SharedState, _file_path: String) -> Result<()> {
         let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
         state_guard.search_results.clear();
+        state_guard.index_version.fetch_add(1, Ordering::Relaxed); // Signal invalidation
         Ok(())
     }
 
     fn invalidate_caches_after_delete(state: SharedState, _file_path: String) -> Result<()> {
         let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
         state_guard.search_results.clear();
+        state_guard.index_version.fetch_add(1, Ordering::Relaxed); // Signal invalidation
         Ok(())
     }
 
@@ -356,6 +385,9 @@ fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -
             .and_then(|name| name.to_str())
             .unwrap_or(&abs_path)
             .to_string();
+            
+        // DIAGNOSTIC: Log the raw distance vs score
+        tracing::debug!("[Oracle] Search Result: {} | Raw Dist: {:.4} | Calc Score: {:.4}", filename, distance, score);
 
         Ok(SearchResult {
             file_id: row.get("file_id")?,

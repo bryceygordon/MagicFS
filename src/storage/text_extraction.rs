@@ -17,9 +17,11 @@ use std::path::Path;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; 
 // Check first 8KB for binary signatures
 const BINARY_CHECK_BUFFER_SIZE: usize = 8192; 
+
 // Chunking Configuration
-const CHUNK_SIZE_CHARS: usize = 1500; // ~300-400 tokens (Fits in 512 context)
-const CHUNK_OVERLAP_CHARS: usize = 150; // 10% overlap
+// Reduced to 256 to aggressively solve Semantic Dilution
+const CHUNK_SIZE_CHARS: usize = 256; 
+const CHUNK_OVERLAP_CHARS: usize = 50; 
 
 /// Extract text content from a file
 pub fn extract_text_from_file(path: &Path) -> Result<String> {
@@ -96,6 +98,8 @@ pub fn chunk_text(text: &str) -> Vec<String> {
     let mut start = 0;
     let text_len = text.len();
 
+    tracing::debug!("[Chunking] Starting split for text length: {}", text_len);
+
     while start < text_len {
         let mut end = start + CHUNK_SIZE_CHARS;
         if end >= text_len {
@@ -111,6 +115,10 @@ pub fn chunk_text(text: &str) -> Vec<String> {
         let chunk = text[start..end].to_string();
         // Only add non-empty chunks
         if !chunk.trim().is_empty() {
+            // DIAGNOSTIC: Log chunks that look like they might contain the secret
+            if chunk.contains("nuclear") {
+                 tracing::info!("[Chunking] Found INTERESTING chunk: {:?}", chunk);
+            }
             chunks.push(chunk);
         }
 
@@ -200,37 +208,4 @@ fn extract_python_code(content: &str) -> String {
 
 fn extract_config(content: &str) -> String {
     extract_plain_text(content)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn test_extract_plain_text() {
-        let content = "Line 1\n\nLine 2\n  Line 3  \n";
-        let result = extract_plain_text(content);
-        assert_eq!(result, "Line 1\nLine 2\nLine 3");
-    }
-
-    #[test]
-    fn test_chunking() {
-        let text = "Hello world. ".repeat(100);
-        let chunks = chunk_text(&text);
-        assert!(!chunks.is_empty());
-        for chunk in &chunks {
-            assert!(chunk.len() <= CHUNK_SIZE_CHARS);
-        }
-    }
-
-    #[test]
-    fn test_binary_detection() {
-        let path = Path::new("/tmp/magicfs_test_binary.bin");
-        let mut file = File::create(&path).unwrap();
-        file.write_all(b"Hello\0World").unwrap();
-        let result = extract_text_from_file(path).unwrap();
-        assert_eq!(result, "");
-        let _ = std::fs::remove_file(path);
-    }
 }

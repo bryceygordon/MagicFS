@@ -8,7 +8,6 @@
 //! NEVER blocks the FUSE loop for >10ms.
 
 use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyStatfs, ReplyOpen, ReplyData, Request};
-use std::sync::Arc;
 use crate::state::SharedState;
 use crate::error::{Result, MagicError};
 
@@ -36,24 +35,31 @@ impl HollowDrive {
             return Ok(inode);
         }
 
-        // Create new inode (simple hash for now, will be replaced with DB inode later)
+        // Create new inode
         let new_inode = self.hash_to_inode(query);
         {
             let state_guard = self.state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            // Double check race condition
+            if let Some(existing) = state_guard.active_searches.get(query) {
+                return Ok(*existing.value());
+            }
             state_guard.active_searches.insert(query.to_string(), new_inode);
+            tracing::info!("[HollowDrive] Assigned Inode {} to query '{}'", new_inode, query);
         }
 
         Ok(new_inode)
     }
 
     /// Simple hash function to generate inodes from query strings
+    /// Always sets the high bit to ensure collision avoidance with static inodes
     fn hash_to_inode(&self, s: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
         s.hash(&mut hasher);
-        hasher.finish() as u64
+        // Set high bit to ensure it doesn't collide with low integers (1, 2, 3)
+        hasher.finish() | 0x8000000000000000
     }
 }
 
@@ -127,7 +133,6 @@ impl Filesystem for HollowDrive {
                 reply.entry(&ttl, &attr, 0);
                 return;
             }
-            // TODO: Handle .magic files like config.db in future phases
             reply.error(libc::ENOENT);
             return;
         }
@@ -141,39 +146,25 @@ impl Filesystem for HollowDrive {
             }
 
             // This is a search query directory
-            // Check if we have this query mapped to an inode
+            // get_or_create_inode synchronously adds it to active_searches if new.
             let query = name_str.to_string();
             if let Ok(search_inode) = self.get_or_create_inode(&query) {
                 // Check if results are in cache
                 let state_guard = self.state.read().map_err(|_| libc::EIO).unwrap();
                 let has_results = state_guard.search_results.get(&search_inode).is_some();
+                
+                // INSTRUMENTATION: Log exactly what we are checking
+                tracing::debug!("[HollowDrive] Lookup query '{}' -> Inode {}. Results present? {}", query, search_inode, has_results);
+                
+                drop(state_guard);
 
                 if has_results {
                     // Results are ready
-                    drop(state_guard);
                     let attr = mk_attr(search_inode, fuser::FileType::Directory);
                     reply.entry(&ttl, &attr, 0);
                 } else {
-                    // Results not ready - trigger Oracle to process search
-                    drop(state_guard);
-                    // Spawn async task to handle the search
-                    let query_for_oracle = query.clone();
-                    let state_for_oracle = Arc::clone(&self.state);
-
-                    tokio::spawn(async move {
-                        // Hash the query to create a consistent inode for this search
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        query_for_oracle.hash(&mut hasher);
-                        let search_inode = hasher.finish() as u64 | 0x8000000000000000; // Mark as dynamic inode
-
-                        // Add the search query to active_searches so Oracle can pick it up
-                        let state_guard = state_for_oracle.write().unwrap();
-                        state_guard.active_searches.insert(query_for_oracle.clone(), search_inode);
-                    });
-
-                    reply.error(libc::EAGAIN); // Signal that results aren't ready yet
+                    // Results not ready. Oracle will pick it up from active_searches.
+                    reply.error(libc::EAGAIN); 
                 }
                 return;
             }
@@ -182,15 +173,12 @@ impl Filesystem for HollowDrive {
         // Handle dynamic search result directories (parent is a search inode)
         // Check if parent is a dynamic search inode
         {
-            let state_guard = self.state.read().map_err(|_| libc::EIO).unwrap();
             let is_search_inode = parent > 3; // All search inodes are > 3
 
             if is_search_inode {
                 // This is a lookup inside a search results directory
                 // The name should be a score_filename.txt
-                // For now, treat all lookups as valid file lookups
-                drop(state_guard);
-
+                
                 // Generate inode for this search result file
                 let file_inode = self.hash_to_inode(&format!("{}-{}", parent, name_str));
                 let attr = mk_attr(file_inode, fuser::FileType::RegularFile);
@@ -225,7 +213,8 @@ impl Filesystem for HollowDrive {
                 }).unwrap();
 
                 // If inode is in search_results, it's a search directory
-                if state_guard.search_results.get(&ino).is_some() {
+                // Note: search_results keys are the inodes of the searches
+                if state_guard.search_results.get(&ino).is_some() || state_guard.active_searches.iter().any(|entry| *entry.value() == ino) {
                     drop(state_guard);
                     (fuser::FileType::Directory, 4096, 2)
                 } else {
@@ -335,6 +324,9 @@ impl Filesystem for HollowDrive {
             };
 
             if let Some(results) = results_opt {
+                // INSTRUMENTATION: Log that we found results
+                tracing::debug!("[HollowDrive] readdir for Inode {} found {} results", ino, results.len());
+                
                 let mut all_entries = entries;
                 let search_results = &results;
 
@@ -354,6 +346,9 @@ impl Filesystem for HollowDrive {
                 }
                 reply.ok();
                 return;
+            } else {
+                 // INSTRUMENTATION: Log that we found NO results
+                 tracing::debug!("[HollowDrive] readdir for Inode {} found NO results in search_results map", ino);
             }
         }
 

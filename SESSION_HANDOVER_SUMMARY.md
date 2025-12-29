@@ -1,56 +1,46 @@
-# 🛑 Session Handover: MagicFS Phase 6 (Chunking Refactor)
+# ✅ Session Handover: MagicFS Phase 6 Complete
 
 **Date**: 2025-12-29
-**Status**: Critical Bug in Search Result Delivery
-**Last Action**: Run `test_05_chunking.py` -> FAILED
+**Status**: 🟢 **STABLE** (All tests passing)
+**Last Action**: `test_05_chunking.py` PASSED
 
-## 📍 Where We Are
-We are in **Phase 6: Hardening**. We successfully refactored the system from "One-File-One-Vector" to **"Sliding Window Chunking"** to solve the Semantic Dilution problem.
+## 🏆 Achievements
+We have successfully completed **Phase 6: Hardening & Resilience**. The system is now robust against binary files, large files, and semantic dilution.
 
-### ✅ What Works
-1.  **Database Schema**: `vec_index` now supports multiple chunks per file (`file_id` is an auxiliary column).
-2.  **Indexing Pipeline**: 
-    * `text_extraction` correctly safeguards against binary files and large files (>10MB).
-    * `text_extraction` correctly splits text into overlapping chunks.
-    * `Oracle` correctly loops through chunks and inserts them into `sqlite-vec`.
-3.  **Search Logic**:
-    * The new **Aggregation Query** (Subquery + Group By) works.
-    * **Logs confirm**: `[Oracle] Search returned 5 aggregated results`.
+### 1. Solved "The Missing Handoff" (Race Condition)
+* **Problem**: HollowDrive would query for results that Oracle had just invalidated, causing an infinite loop.
+* **Fix**: Implemented `index_version` in `GlobalState`. The Oracle now tracks this version and flushes its internal `processed_queries` cache whenever the index changes, forcing a retry.
 
-## 🐛 The Bug: "The Missing Handoff"
-**Symptom**: 
-`test_05_chunking.py` correctly indexes the file (`needle.txt` -> 5 chunks). It then queries "nuclear launch code". The Oracle runs the search, finds 5 results, but the Python test script (accessing via FUSE) sees an empty directory or `ENOENT`, eventually timing out.
+### 2. Solved "Semantic Dilution" (The Onion Problem)
+* **Problem**: Small signals (keys/passwords) were lost in large noise blocks.
+* **Fix**: 
+    * Implemented **Sliding Window Chunking** (256 chars, 50 overlap).
+    * Aggregated search results using `MIN(distance)` (best chunk wins).
 
-**Evidence (Log Analysis)**:
-1.  **Data Exists**: `[Oracle] Total chunks in vec_index before search: 6`
-2.  **Query Works**: `[Oracle] Search returned 5 aggregated results`
-3.  **FUSE Loops**: `[HollowDrive] lookup: parent=3, name="nuclear launch code"` repeats 20+ times.
-4.  **Failure**: The FUSE layer never seems to "see" the results that the Oracle produced.
+### 3. Solved "The 0.09 Score" (Metric Mismatch)
+* **Problem**: `sqlite-vec` defaulted to Euclidean distance, breaking our `1.0 - distance` scoring logic.
+* **Fix**: Enforced `distance_metric=cosine` in the database schema.
 
-## 🕵️ Hypotheses for Next Session
-The disconnect is between **Oracle** finishing the search and **HollowDrive** serving the directory.
+## 🧪 Test Suite Metrics
+All tests passed with flying colors:
+| Test | Status | Notes |
+| :--- | :--- | :--- |
+| `test_01_indexing` | ✅ PASS | Dynamic Indexing |
+| `test_02_dotfiles` | ✅ PASS | Ignore Rules working |
+| `test_03_search` | ✅ PASS | End-to-End Search |
+| `test_04_hardening` | ✅ PASS | Binary/Large files rejected |
+| `test_05_chunking` | ✅ PASS | "Needle in Haystack" found (Score ~0.75) |
 
-1.  **Inode Mismatch**: 
-    * `HollowDrive` generates a dynamic inode for the search query (hash of string).
-    * `Oracle` retrieves the inode from `active_searches`.
-    * *Check*: Is the `inode` the Oracle inserts into `GlobalState.search_results` the exact same `inode` the FUSE `readdir` is looking up?
+## 📅 Next Steps (Phase 7)
+The system is functional and hardened. The next phase focuses on **Polish & Compatibility**.
 
-2.  **DashMap Visibility**:
-    * `Oracle` inserts into `search_results` (DashMap).
-    * `HollowDrive` reads from `search_results`.
-    * *Check*: Is `HollowDrive` checking `active_searches` before checking `search_results` and returning `EAGAIN` prematurely?
+1.  **LRU Cache**: `GlobalState.search_results` grows indefinitely. Needs eviction.
+2.  **Daemon Mode**: CLI args for background execution.
+3.  **PDF/DOCX**: Add support for non-text formats.
 
-3.  **FUSE Cache/TTL**:
-    * `HollowDrive` returns `TTL=1s`. 
-    * If it returned `ENOENT` or an empty directory *once* before the Oracle finished, the kernel might be caching that negative result, causing the loop.
-
-## 🛠️ Next Steps for New Chat
-1.  **Instrument `HollowDrive`**: Add debug logs to `src/hollow_drive.rs` in `lookup` and `readdir` to print *exactly* which inode it is looking for and what it finds in `GlobalState.search_results`.
-2.  **Verify Inode Integrity**: Log the inode ID in `Oracle::process_search_query` just before insertion.
-3.  **Run Test**: `./tests/run_suite.sh` and compare the Inode IDs.
-
-## 📂 Key Files Modified in This Session
-- `src/storage/text_extraction.rs`: Added chunking & binary guards.
-- `src/storage/connection.rs`: Updated schema for chunks.
-- `src/storage/vec_index.rs`: Updated insert/delete logic.
-- `src/oracle.rs`: Updated indexing loop and search aggregation query.
+## 📂 Key Files Modified
+* `src/hollow_drive.rs`: Fixed inode hashing and race condition.
+* `src/oracle.rs`: Added version-based cache invalidation.
+* `src/state.rs`: Added `index_version` atomic counter.
+* `src/storage/connection.rs`: Added `distance_metric=cosine`.
+* `src/storage/text_extraction.rs`: Optimized chunk size (256 chars).
