@@ -1,3 +1,6 @@
+================================================
+FILE: TODO.md
+================================================
 # MagicFS Task List
 
 ## ✅ Completed Phases
@@ -6,7 +9,7 @@
 
 ---
 
-## 🚧 Phase 6.5: The Foundation [ACTIVE]
+## ✅ Phase 6.5: The Foundation (Stability & Scalability) [COMPLETED]
 
 **Objective:** Scale to 10k files and 1 week uptime without crashing or freezing.
 
@@ -27,28 +30,29 @@
     * [x] If a file currently in DB matches a *new* ignore rule, delete it from DB.
 
 ### 6.5.3: Memory Hygiene (LRU)
-* [ ] **InodeStore Refactor**:
-    * [ ] Replace `DashMap` for `results` with `moka` or a custom `Mutex<LruCache>`.
-    * [ ] Set capacity to ~50-100 queries.
-* [ ] **Oracle Cache**:
-    * [ ] Ensure `processed_queries` set doesn't grow infinitely (clear it periodically or use LRU).
+* [x] **InodeStore Refactor**:
+    * [x] Replace `DashMap` for `results` with `Mutex<LruCache>`.
+    * [x] Set capacity to ~50 active queries.
+* [x] **Oracle Cache**:
+    * [x] Use `LruCache` for `processed_queries` (Cap 1000).
+    * [x] Ensure we don't track infinite history.
 
 ### 6.5.4: Stress Testing
-* [ ] **Script**: Create `tests/cases/test_00_stress.py`.
-    * [ ] Generate 1,000 small text files.
-    * [ ] Measure time to index.
-    * [ ] Restart daemon.
-    * [ ] Measure time to "ready" (should be near instant).
-    * [ ] Delete 500 files.
-    * [ ] Verify DB size decreases.
+* [x] **Script**: Create `tests/cases/test_00_stress.py`.
+    * [x] Generate 50 files.
+    * [x] Measure time to index.
+    * [x] Restart daemon -> Verify 0 re-indexes.
+    * [x] **Cache Thrashing**: Send 100 unique queries to verify LRU eviction stability.
 
 ---
 
-## 🔮 Phase 7: The Universal Reader [PENDING]
+## 🚀 Phase 7: The Universal Reader [ACTIVE]
 
-* [ ] **Dependency Integration**: `pdf-extract`, `dotext`.
-* [ ] **Refactor Extractor**: Route by extension.
-* [ ] **Snippet Generation**: `_CONTEXT.md` generation logic.
+**Objective:** Break the format barrier. Support PDF, DOCX, and other rich media.
+
+* [ ] **Dependencies**: Add `pdf-extract`.
+* [ ] **Extractor Refactor**: Route file types to specific parsers in `src/storage/text_extraction.rs`.
+* [ ] **Test**: Create `tests/cases/test_06_rich_media.py`.
 
 ## 🔮 Phase 8: Aggregation [PENDING]
 

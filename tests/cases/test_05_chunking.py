@@ -1,6 +1,7 @@
 from common import MagicTest
 import time
 import os
+import sys
 
 test = MagicTest()
 print("--- TEST 05: Chunking & Semantic Dilution ---")
@@ -22,12 +23,11 @@ print("[*] Searching for 'nuclear launch code'...")
 search_path = os.path.join(test.mount_point, "search", "nuclear launch code")
 found = False
 
-# Increased retries to 30 (15 seconds) to match other tests
+# Retries = 30 * 0.5s = 15 seconds
 for i in range(30):
     if os.path.exists(search_path):
         try:
             files = os.listdir(search_path)
-            # Look for the file. The format is "SCORE_filename".
             for f in files:
                 if "needle.txt" in f:
                     score_str = f.split("_")[0]
@@ -42,12 +42,10 @@ for i in range(30):
                             break
                         else:
                             print(f"❌ Score {score} too low! Semantic dilution occurred.")
-                            test.dump_logs()
-                            exit(1)
+                            sys.exit(1)
                     except ValueError:
                         continue
         except OSError:
-            # Directory might vanish momentarily during updates
             pass
             
     if found: break
@@ -63,8 +61,8 @@ if not found:
         print(f"   Contents: {os.listdir(search_path)}")
     else:
         print("   Directory does not exist.")
-        
-    test.dump_logs()
-    exit(1)
+    
+    # We exit with 1. The Runner (run_suite.sh) will catch this and dump logs.
+    sys.exit(1)
 
 print("✅ CHUNKING TEST PASSED")

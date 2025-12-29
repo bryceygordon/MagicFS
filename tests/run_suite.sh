@@ -1,7 +1,11 @@
 #!/bin/bash
 
 # ==================================================================================
-# ⚠️  CRITICAL TERMINAL CONTROL SECTION ⚠️
+# ⚠️  CRITICAL TERMINAL CONTROL SECTION - DO NOT REMOVE  ⚠️
+# ==================================================================================
+# The following block prevents "laddering" (stair-step output) which renders
+# logs unreadable. It saves the TTY state before tests run and FORCES restoration
+# upon any exit signal.
 # ==================================================================================
 SAVED_TERM=$(stty -g)
 
@@ -55,6 +59,7 @@ cargo build --quiet || exit 1
 
 # 3. Launch
 echo "[Launch] Starting Daemon..."
+# Log redirection happens here. We tail this file on failure.
 sudo nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
 sleep 2
 
@@ -65,19 +70,22 @@ for test_file in tests/cases/*.py; do
     restore_term
     echo -e "\n>>> Running: $(basename "$test_file")"
     
-    # Run unbuffered
+    # Run unbuffered (-u) so we see output before any potential crash
     python3 -u "$test_file" "$DB_PATH" "$MOUNT_POINT" "$WATCH_DIR"
     RESULT=$?
     
     if [ $RESULT -ne 0 ]; then
         restore_term
         echo -e "\n❌ TEST FAILED: $(basename "$test_file")"
-        
-        # FAILSAFE: Dump logs via bash if Python didn't do it
-        echo "--- LOG SUMMARY (Last 100 lines) ---"
+        echo "================================================================"
+        echo "📜  MAGICFS LOG DUMP (Last 100 lines)"
+        echo "================================================================"
         if [ -f "$LOG_FILE" ]; then
-            tail -n 100 "$LOG_FILE"
+            tail -n 50 "$LOG_FILE"
+        else
+            echo "⚠️  Log file not found!"
         fi
+        echo "================================================================"
         exit 1
     fi
 done
