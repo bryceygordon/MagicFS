@@ -14,4 +14,7 @@ pub mod vec_index;
 pub use connection::init_connection;
 pub use file_registry::{register_file, get_file_by_path, get_file_by_inode, list_files, update_file_mtime, delete_file, get_file_count, FileRecord};
 pub use text_extraction::extract_text_from_file;
-pub use vec_index::{insert_embedding, update_embedding, delete_embedding};
+// FIX: Updated exports to match Phase 6 Chunking API
+// - Removed update_embedding (we now delete + insert)
+// - Renamed delete_embedding -> delete_embeddings_for_file
+pub use vec_index::{insert_embedding, delete_embeddings_for_file};

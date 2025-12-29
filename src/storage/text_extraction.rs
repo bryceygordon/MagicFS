@@ -5,7 +5,8 @@
 //! 
 //! HARDENING:
 //! - Enforces 10MB limit to prevent OOM.
-//! - Checks for binary content (null bytes) to prevent garbage indexing.
+//! - Checks for binary content (null bytes).
+//! - Implements Sliding Window Chunking.
 
 use crate::error::Result;
 use std::fs::File;
@@ -16,9 +17,11 @@ use std::path::Path;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; 
 // Check first 8KB for binary signatures
 const BINARY_CHECK_BUFFER_SIZE: usize = 8192; 
+// Chunking Configuration
+const CHUNK_SIZE_CHARS: usize = 1500; // ~300-400 tokens (Fits in 512 context)
+const CHUNK_OVERLAP_CHARS: usize = 150; // 10% overlap
 
 /// Extract text content from a file
-/// Supports: .txt, .rs, .md, .json, .yaml, .toml, .toml, and other text files
 pub fn extract_text_from_file(path: &Path) -> Result<String> {
     // Check if file exists and is readable
     if !path.exists() {
@@ -34,34 +37,30 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
     }
 
     // 1. FAIL FIRST: Check File Size
-    let metadata = std::fs::metadata(path).map_err(|e| crate::error::MagicError::Io(e))?;
+    let metadata = std::fs::metadata(path).map_err(crate::error::MagicError::Io)?;
     let file_size = metadata.len();
 
     if file_size > MAX_FILE_SIZE {
         tracing::warn!("[TextExtraction] Skipping large file ({} bytes): {}", file_size, path.display());
-        // Return empty string to signal "nothing to index", but don't error out the pipeline
         return Ok(String::new());
     }
 
-    let mut file = File::open(path)
-        .map_err(|e| crate::error::MagicError::Io(e))?;
+    let mut file = File::open(path).map_err(crate::error::MagicError::Io)?;
 
     // 2. FAIL FIRST: Check for Binary Content (Null Bytes)
-    // Read the beginning of the file to check for \0
     let mut buffer = [0u8; BINARY_CHECK_BUFFER_SIZE];
-    let bytes_read = file.read(&mut buffer).map_err(|e| crate::error::MagicError::Io(e))?;
+    let bytes_read = file.read(&mut buffer).map_err(crate::error::MagicError::Io)?;
 
     if buffer[..bytes_read].contains(&0) {
         tracing::debug!("[TextExtraction] Skipping binary file (null bytes detected): {}", path.display());
         return Ok(String::new());
     }
 
-    // Rewind to start after check
-    file.seek(SeekFrom::Start(0)).map_err(|e| crate::error::MagicError::Io(e))?;
+    // Rewind to start
+    file.seek(SeekFrom::Start(0)).map_err(crate::error::MagicError::Io)?;
 
-    // 3. Read Content (Safe now)
+    // 3. Read Content
     let mut content = String::new();
-    // We use read_to_string which does UTF-8 validation
     match file.read_to_string(&mut content) {
         Ok(_) => {},
         Err(_) => {
@@ -77,26 +76,59 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
         .to_lowercase();
 
     let extracted_text = match extension.as_str() {
-        // Plain text files
         "txt" | "log" | "md" | "rst" => extract_plain_text(&content),
-
-        // Source code files
         "rs" | "py" | "js" | "ts" | "java" | "c" | "cpp" | "h" | "hpp" |
         "go" | "rb" | "php" | "sh" | "bash" | "zsh" | "fish" => extract_source_code(&content, &extension),
-
-        // Config files
         "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" => extract_config(&content),
-
-        // Other text files
         _ => extract_plain_text(&content),
     };
 
     Ok(extracted_text)
 }
 
+/// Split text into overlapping chunks
+pub fn chunk_text(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let text_len = text.len();
+
+    while start < text_len {
+        let mut end = start + CHUNK_SIZE_CHARS;
+        if end >= text_len {
+            end = text_len;
+        } else {
+            // Try to find a space or newline to break on nicely, working backwards
+            if let Some(offset) = text[start..end].rfind(|c: char| c.is_whitespace()) {
+                end = start + offset + 1; // Include the whitespace
+            }
+        }
+        
+        // Take slice
+        let chunk = text[start..end].to_string();
+        // Only add non-empty chunks
+        if !chunk.trim().is_empty() {
+            chunks.push(chunk);
+        }
+
+        // If we reached the end, break
+        if end == text_len {
+            break;
+        }
+
+        // Move start forward, but minus overlap
+        let next_start = end - CHUNK_OVERLAP_CHARS;
+        start = std::cmp::max(start + 1, next_start);
+    }
+
+    chunks
+}
+
 /// Extract plain text content
 fn extract_plain_text(content: &str) -> String {
-    // Remove excessive whitespace and normalize
     content.lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
@@ -125,19 +157,16 @@ fn extract_rust_code(content: &str) -> String {
         if line.starts_with("/*") {
             in_block_comment = true;
             if line.ends_with("*/") && line.len() > 4 {
-                // Single-line block comment
                 in_block_comment = false;
             }
             continue;
         }
-
         if in_block_comment {
             if line.ends_with("*/") {
                 in_block_comment = false;
             }
             continue;
         }
-
         if line.starts_with("//") {
             continue;
         }
@@ -147,7 +176,6 @@ fn extract_rust_code(content: &str) -> String {
             result.push('\n');
         }
     }
-
     result
 }
 
@@ -155,30 +183,22 @@ fn extract_rust_code(content: &str) -> String {
 fn extract_python_code(content: &str) -> String {
     let mut result = String::new();
     let lines: Vec<&str> = content.lines().collect();
-
     for &line in &lines {
         let line = line.trim();
-
-        // Remove inline comments
         let line_no_comments = if let Some(hash_pos) = line.find('#') {
             &line[..hash_pos]
         } else {
             line
         };
-
         if !line_no_comments.trim().is_empty() {
             result.push_str(line_no_comments);
             result.push('\n');
         }
     }
-
     result
 }
 
-/// Extract configuration files (extracts keys and values)
 fn extract_config(content: &str) -> String {
-    // For now, treat config as plain text
-    // Could be enhanced to parse JSON, YAML, etc.
     extract_plain_text(content)
 }
 
@@ -195,17 +215,22 @@ mod tests {
     }
 
     #[test]
+    fn test_chunking() {
+        let text = "Hello world. ".repeat(100);
+        let chunks = chunk_text(&text);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(chunk.len() <= CHUNK_SIZE_CHARS);
+        }
+    }
+
+    #[test]
     fn test_binary_detection() {
-        // Create a temporary binary file
         let path = Path::new("/tmp/magicfs_test_binary.bin");
         let mut file = File::create(&path).unwrap();
-        // Write null bytes
         file.write_all(b"Hello\0World").unwrap();
-        
         let result = extract_text_from_file(path).unwrap();
-        assert_eq!(result, "", "Binary file should return empty string");
-        
-        // Cleanup
+        assert_eq!(result, "");
         let _ = std::fs::remove_file(path);
     }
 }
