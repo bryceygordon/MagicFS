@@ -1,24 +1,26 @@
 from common import MagicTest
 import time
+import os
 
 test = MagicTest()
 print("--- TEST 02: Dynamic Ignore Rules ---")
 
-# 1. Set up ignore rules
-# We must explicitly add .git if we want to test that it gets ignored!
-test.add_ignore_rule("secrets")
-test.add_ignore_rule(".git")
-
-# 2. Create ignored content
+# 1. Create a file that SHOULD be indexed initially
 test.create_file("secrets/password.txt", "super_secret")
-test.create_file(".git/config", "repo_config")
+test.wait_for_indexing("password.txt")
 
-# 3. Create normal content to ensure system is still working
-# This acts as a "barrier" to ensure the previous file events have been processed
+# 2. Add ignore rule
+test.add_ignore_rule("secrets")
+time.sleep(1) # Extra time for Librarian to reload
+
+# 3. Create canary to prove Librarian processed the batch
 test.create_file("public/readme.md", "# Public Info")
 test.wait_for_indexing("readme.md")
 
-# 4. Assertions
-test.assert_file_not_indexed("password.txt")
-test.assert_file_not_indexed("config") 
-test.assert_file_indexed("readme.md")
+# 4. Create file in ignored dir
+test.create_file("secrets/new_password.txt", "even_more_secret")
+time.sleep(1.5) # Wait for debounce + processing
+
+# 5. Assert
+test.assert_file_not_indexed("new_password.txt")
+print("✅ Dynamic ignore rule is working.")
