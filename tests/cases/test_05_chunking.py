@@ -1,5 +1,6 @@
 from common import MagicTest
 import time
+import os
 
 test = MagicTest()
 print("--- TEST 05: Chunking & Semantic Dilution ---")
@@ -16,45 +17,54 @@ test.create_file("needle.txt", content)
 test.wait_for_indexing("needle.txt")
 
 # 3. Search for the needle
-# In a non-chunked system, this search often fails or returns a score so low
-# it's filtered out, because the embedding is dominated by "onions" and "frying pans".
-# We expect MagicFS to find this with high confidence.
 print("[*] Searching for 'nuclear launch code'...")
 
-# We manually check the search results to inspect the score
-import os
 search_path = os.path.join(test.mount_point, "search", "nuclear launch code")
-
 found = False
-for i in range(10):
+
+# Increased retries to 30 (15 seconds) to match other tests
+for i in range(30):
     if os.path.exists(search_path):
-        files = os.listdir(search_path)
-        # Look for the file. The format is "SCORE_filename".
-        # We want to ensure it found it AND the score is decent.
-        for f in files:
-            if "needle.txt" in f:
-                score_str = f.split("_")[0]
-                score = float(score_str)
-                print(f"✅ Found file with score: {score}")
-                
-                # Threshold logic:
-                # - Noise typically scores < 0.45
-                # - A 30-char needle in a 256-char chunk is ~12% signal.
-                # - A score of 0.60+ is a statistically significant match.
-                # - We saw 0.75 in testing, so 0.60 is a safe robust guardrail.
-                if score > 0.60:
-                    print("✅ Score indicates strong semantic match (Chunking working).")
-                    found = True
-                    break
-                else:
-                    print("❌ Score too low! Semantic dilution occurred.")
-                    exit(1)
-        if found: break
+        try:
+            files = os.listdir(search_path)
+            # Look for the file. The format is "SCORE_filename".
+            for f in files:
+                if "needle.txt" in f:
+                    score_str = f.split("_")[0]
+                    try:
+                        score = float(score_str)
+                        print(f"✅ Found file with score: {score}")
+                        
+                        # Threshold logic:
+                        if score > 0.60:
+                            print("✅ Score indicates strong semantic match (Chunking working).")
+                            found = True
+                            break
+                        else:
+                            print(f"❌ Score {score} too low! Semantic dilution occurred.")
+                            test.dump_logs()
+                            exit(1)
+                    except ValueError:
+                        continue
+        except OSError:
+            # Directory might vanish momentarily during updates
+            pass
+            
+    if found: break
     
+    if i % 5 == 0:
+        print(f"   ... waiting for Oracle (attempt {i+1}/30)")
     time.sleep(0.5)
 
 if not found:
     print("❌ FAILURE: File not found in search results.")
+    # DEBUG: List directory if it exists to see what WAS found
+    if os.path.exists(search_path):
+        print(f"   Contents: {os.listdir(search_path)}")
+    else:
+        print("   Directory does not exist.")
+        
+    test.dump_logs()
     exit(1)
 
 print("✅ CHUNKING TEST PASSED")
