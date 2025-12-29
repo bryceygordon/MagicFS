@@ -22,9 +22,10 @@
     * [x] *Check:* Run `tests/run_suite.sh`.
 
 
+
 ## Phase 7: The Universal Reader [ACTIVE]
 
-**Objective:** Enable MagicFS to read and index PDF and DOCX files.
+**Objective:** Enable MagicFS to read PDF/DOCX files and expose "Why it matched" snippets.
 
 * [ ] **7.1: Dependency Integration**
     * [ ] Add `pdf-extract` (or `lopdf`) to `Cargo.toml`.
@@ -37,10 +38,17 @@
     * [ ] Implement `extract_office(path: &Path) -> Result<String>`.
     * [ ] Ensure "Fail First" checks (Size > 10MB) apply *before* parsing starts.
 
-* [ ] **7.3: Testing**
+* [ ] **7.3: Contextual Snippets (`_CONTEXT.md`)**
+    * [ ] Update `SearchResult` struct in `state.rs` to include `snippets: Vec<String>`.
+    * [ ] Update `Repository::search` SQL query to return the text content of the best matching chunks (not just the file ID).
+    * [ ] Update `HollowDrive::lookup` to handle `_CONTEXT.md`.
+    * [ ] Update `HollowDrive::read` to generate the Markdown report on the fly.
+
+* [ ] **7.4: Testing**
     * [ ] Create `tests/cases/test_06_rich_media.py`.
     * [ ] Mock a PDF file (or check in a tiny test PDF).
     * [ ] Verify the search finds text inside the binary format.
+    * [ ] Verify `_CONTEXT.md` exists and contains the expected snippets.
 
 ## Phase 8: Aggregation & Persistence (Planned)
 
