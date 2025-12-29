@@ -1,14 +1,15 @@
 # MagicFS Development Roadmap
 
-## 🎯 Vision: The Universal Reader
+## 🎯 Vision: The Universal Context Layer
 
-We are building the "Context Layer" of the OS. The goal is to allow users to manipulate files based on *meaning*, not just location, regardless of whether the file is a text file, a PDF, or a Word doc.
+We are building the "Context Layer" of the OS. The goal is to allow users to manipulate files based on *meaning* rather than location, and to aggregate scattered "Data Islands" (Obsidian, GDrive, ~/Documents) into a single, unified interface.
 
 ---
 
 ## 📜 History
-* **Phases 1-5 (Foundation)**: Basic FUSE, SQLite, FastEmbed.
-* **Phase 6 (Hardening)**: "Three-Organ" Architecture, Chunking, Binary Safety.
+
+* **Phases 1-5 (Foundation)**: Basic FUSE loop, SQLite storage, FastEmbed integration.
+* **Phase 6 (Hardening)**: "Three-Organ" Architecture, Chunking, Binary Safety, 10MB limits.
 
 ---
 
@@ -24,18 +25,25 @@ We are building the "Context Layer" of the OS. The goal is to allow users to man
 2.  **Contextual Visibility**:
     * Experiment: Virtual files (e.g., `file.pdf.summary`) that show *why* a match occurred.
 
-### 🔮 Phase 8: Persistence & Workflows
-**Goal:** Transform from "Search Tool" to "Organization System".
+### 🔮 Phase 8: Aggregation & Persistence (Next Up)
+**Goal:** Transform from "Single Folder Watcher" to "System-Wide Aggregator".
 
-1.  **Write Support (The "Config Filesystem")**:
-    * Allow `mkdir` in `/saved/`.
-    * Allow writing to `.query` files to define folders.
-2.  **Saved Views**:
-    * Persist these folder definitions to `~/.magicfs/saved_views.db`.
-    * *Scenario:* `mkdir /magic/saved/Tax2024` -> Auto-populates with all tax docs.
+1.  **Multi-Root Support (The "Sources" Directory)**:
+    * **Feature**: Expose a virtual directory `/sources`.
+    * **Workflow**: Users add watch paths via symlink: `ln -s ~/Obsidian /mountpoint/sources/notes`.
+    * **Backend**: Librarian upgrades to handle multiple, dynamic `notify` watchers.
+2.  **Saved Views (Workflows)**:
+    * **Feature**: Expose a virtual directory `/saved`.
+    * **Workflow**: Users create smart folders via mkdir: `mkdir /mountpoint/saved/ProjectApollo`.
+3.  **State vs. Cache Separation (Backup Strategy)**:
+    * **State (Precious)**: `~/.config/magicfs/` stores `sources.json` and `views.json`. This is small and must be backed up.
+    * **Cache (Disposable)**: `~/.cache/magicfs/` stores `index.db`. This is heavy and can be rebuilt.
 
 ---
 
 ## 📏 Critical Constraints
-1.  **Memory Cap**: ~500MB RAM. (Parsing PDFs can be heavy; we must stream or chunk aggressively).
-2.  **Dependency Weight**: Avoid `libpoppler` if possible, but prioritize correctness for now.
+
+1.  **The 10ms Law**: FUSE ops must never block >10ms.
+2.  **Memory Cap**: ~500MB RAM. (Parsing PDFs can be heavy; we must stream or chunk aggressively).
+3.  **Dependency Weight**: Avoid `libpoppler` if possible, but prioritize correctness for now.
+4.  **Zero Config**: Adding a source happens via the filesystem (`ln -s`), not a YAML file.

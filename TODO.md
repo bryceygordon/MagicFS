@@ -21,6 +21,7 @@
     * [x] Refactor `Oracle` to be a lightweight Orchestrator.
     * [x] *Check:* Run `tests/run_suite.sh`.
 
+
 ## Phase 7: The Universal Reader [ACTIVE]
 
 **Objective:** Enable MagicFS to read and index PDF and DOCX files.
@@ -41,6 +42,27 @@
     * [ ] Mock a PDF file (or check in a tiny test PDF).
     * [ ] Verify the search finds text inside the binary format.
 
-## Phase 8: Persistence (On Deck)
-* [ ] Implement `mkdir` support in `HollowDrive`.
-* [ ] Implement `write` support for `.query` files.
+## Phase 8: Aggregation & Persistence (Planned)
+
+**Objective:** Support multi-root watching and XDG-compliant state persistence.
+
+* [ ] **8.1: State Management (The "Precious" Data)**
+    * [ ] Create `src/config.rs` to handle loading/saving `sources.json` and `views.json`.
+    * [ ] Implement XDG Base Directory logic (`~/.config/magicfs` vs `~/.cache/magicfs`).
+    * [ ] Ensure `index.db` is moved to the cache directory.
+
+* [ ] **8.2: The Librarian Upgrade**
+    * [ ] Refactor `Librarian` to hold a `HashMap<PathBuf, Watcher>` instead of a single watcher.
+    * [ ] Implement `add_source(path)` and `remove_source(path)` methods.
+    * [ ] Ensure existing index entries are purged when a source is removed.
+
+* [ ] **8.3: The Virtual Interface**
+    * [ ] Update `HollowDrive` to expose `/sources` (Virtual Directory).
+    * [ ] Implement `symlink` syscall in `HollowDrive` to trigger `Librarian::add_source`.
+    * [ ] Implement `unlink` syscall in `HollowDrive` to trigger `Librarian::remove_source`.
+    * [ ] Implement `mkdir` in `/saved` to trigger View creation.
+
+* [ ] **8.4: Testing Persistence**
+    * [ ] Create `tests/cases/test_07_multiroot.py`.
+    * [ ] Verify adding a source via symlink starts indexing immediately.
+    * [ ] Verify restarting the daemon restores the sources from config.
