@@ -1,20 +1,28 @@
-//! Storage module - SQLite database and file registry
-//!
-//! Handles all persistent storage operations for MagicFS:
-//! - Database initialization with WAL mode
-//! - file_registry table (maps physical files to inodes)
-//! - vec_index table (vector embeddings via sqlite-vec)
-//! - system_config table (key-value metadata)
-
+// FILE: src/storage/mod.rs
 pub mod connection;
-pub mod file_registry;
 pub mod text_extraction;
-pub mod vec_index;
+pub mod repository;
 
-pub use connection::init_connection;
-pub use file_registry::{register_file, get_file_by_path, get_file_by_inode, list_files, update_file_mtime, delete_file, get_file_count, FileRecord};
+// Common exports
+pub use repository::Repository;
+pub use connection::init_connection; // Kept for main.rs bootstrap
 pub use text_extraction::extract_text_from_file;
-// FIX: Updated exports to match Phase 6 Chunking API
-// - Removed update_embedding (we now delete + insert)
-// - Renamed delete_embedding -> delete_embeddings_for_file
-pub use vec_index::{insert_embedding, delete_embeddings_for_file};
+
+// Data Types
+#[derive(Debug, Clone)]
+pub struct FileRecord {
+    pub file_id: u64,
+    pub abs_path: String,
+    pub inode: u64,
+    pub mtime: u64,
+    pub size: u64,
+    pub is_dir: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl std::fmt::Display for FileRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (inode: {}, size: {})", self.abs_path, self.inode, self.size)
+    }
+}

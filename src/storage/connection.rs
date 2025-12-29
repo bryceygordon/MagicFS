@@ -2,10 +2,12 @@
 //!
 //! Provides lazy initialization and connection management for the database.
 //! Works with GlobalState's db_connection field.
+//! Uses Repository for schema initialization.
 
 use std::sync::Arc;
 use rusqlite::Connection;
 use crate::SharedState;
+use crate::storage::Repository;
 
 /// Register sqlite-vec extension with SQLite
 fn register_sqlite_vec_extension() -> crate::error::Result<()> {
@@ -39,86 +41,24 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     let conn = Connection::open(db_path)
         .map_err(crate::error::MagicError::Database)?;
 
-    conn.pragma_update(None, "journal_mode", WAL)?;
-    conn.pragma_update(None, "foreign_keys", ON)?;
-    conn.pragma_update(None, "synchronous", NORMAL)?;
+    // Performance Pragma
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
 
-    let initialized_db = !std::path::Path::new(db_path).exists()
-        || conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='file_registry'", [], |row| row.get::<_, i32>(0)).unwrap_or(0) == 0;
+    // Use Repository to init schema
+    // We create a temporary Repository just for this init step
+    let repo = Repository::new(&conn);
+    repo.initialize()?;
 
-    if initialized_db {
-        conn.execute_batch(r#"
-            CREATE TABLE IF NOT EXISTS file_registry (
-                file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                abs_path TEXT NOT NULL UNIQUE,
-                inode INTEGER NOT NULL,
-                mtime INTEGER NOT NULL,
-                size INTEGER NOT NULL DEFAULT 0,
-                is_dir INTEGER NOT NULL DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS system_config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#)?;
-
-        // Phase 6 Schema: Support multiple chunks per file + Cosine Distance
-        conn.execute("DROP TABLE IF EXISTS vec_index", [])?;
-        match conn.execute_batch(r#"
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
-                file_id INTEGER,          -- Link to file_registry
-                embedding float[384] distance_metric=cosine
-            )
-        "#) {
-            Ok(_) => tracing::info!("Created vec_index table (Chunking enabled, Cosine Metric)"),
-            Err(e) => tracing::warn!("Failed to create vec_index table: {}", e),
-        }
-
-        tracing::info!("Initialized new database with Chunking schema");
-    } else {
-        tracing::info!("Loaded existing database");
-
-        // Migration: Ensure vec_index uses Cosine Distance
-        // In dev, we just drop and recreate to enforce the metric change.
-        tracing::info!("Ensuring vec_index supports chunking and cosine distance...");
-        let _ = conn.execute("DROP TABLE IF EXISTS vec_index", []);
-          
-        match conn.execute_batch(r#"
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
-                file_id INTEGER,
-                embedding float[384] distance_metric=cosine
-            )
-        "#) {
-            Ok(_) => tracing::info!("Recreated vec_index table for Chunking/Cosine"),
-            Err(e) => tracing::warn!("Failed to recreate vec_index: {}", e),
-        }
-    }
-
-    let conn_arc = {
-        let state_guard = state.read()
-            .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
-        Arc::clone(&state_guard.db_connection)
-    };
-    {
-        let mut conn_guard = conn_arc.lock()
-            .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
-        *conn_guard = Some(conn);
-    }
-
+    // Store in global state
+    let mut guard = state.write().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
+    guard.db_connection = Arc::new(std::sync::Mutex::new(Some(conn)));
+    
     Ok(())
 }
 
 pub fn get_connection(state: &SharedState) -> crate::error::Result<Arc<std::sync::Mutex<Option<Connection>>>> {
-    let state_guard = state.read()
-        .map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
-    Ok(state_guard.db_connection.clone())
+    let guard = state.read().map_err(|_| crate::error::MagicError::State("Poisoned lock".into()))?;
+    Ok(guard.db_connection.clone())
 }
-
-const WAL: &str = "WAL";
-const ON: &str = "ON";
-const NORMAL: &str = "NORMAL";

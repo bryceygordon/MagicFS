@@ -1,3 +1,4 @@
+// FILE: src/hollow_drive.rs
 //! Hollow Drive: The Synchronous FUSE Loop (The Face)
 //!
 //! This is the "Dumb Terminal" that accepts syscalls (lookup, readdir)
@@ -9,7 +10,6 @@
 
 use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyStatfs, ReplyOpen, ReplyData, Request};
 use crate::state::SharedState;
-use crate::error::{Result, MagicError};
 
 /// The Hollow Drive filesystem implementation
 pub struct HollowDrive {
@@ -21,45 +21,6 @@ impl HollowDrive {
     /// Create a new Hollow Drive instance
     pub fn new(state: SharedState) -> Self {
         Self { state }
-    }
-
-    /// Get or create dynamic inode for a query
-    fn get_or_create_inode(&self, query: &str) -> Result<u64> {
-        // Check if we already have this query mapped
-        let existing_inode = {
-            let state_guard = self.state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            state_guard.active_searches.get(query).map(|entry| *entry.value())
-        };
-
-        if let Some(inode) = existing_inode {
-            return Ok(inode);
-        }
-
-        // Create new inode
-        let new_inode = self.hash_to_inode(query);
-        {
-            let state_guard = self.state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            // Double check race condition
-            if let Some(existing) = state_guard.active_searches.get(query) {
-                return Ok(*existing.value());
-            }
-            state_guard.active_searches.insert(query.to_string(), new_inode);
-            tracing::info!("[HollowDrive] Assigned Inode {} to query '{}'", new_inode, query);
-        }
-
-        Ok(new_inode)
-    }
-
-    /// Simple hash function to generate inodes from query strings
-    /// Always sets the high bit to ensure collision avoidance with static inodes
-    fn hash_to_inode(&self, s: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        // Set high bit to ensure it doesn't collide with low integers (1, 2, 3)
-        hasher.finish() | 0x8000000000000000
     }
 }
 
@@ -146,41 +107,42 @@ impl Filesystem for HollowDrive {
             }
 
             // This is a search query directory
-            // get_or_create_inode synchronously adds it to active_searches if new.
             let query = name_str.to_string();
-            if let Ok(search_inode) = self.get_or_create_inode(&query) {
-                // Check if results are in cache
-                let state_guard = self.state.read().map_err(|_| libc::EIO).unwrap();
-                let has_results = state_guard.search_results.get(&search_inode).is_some();
-                
-                // INSTRUMENTATION: Log exactly what we are checking
-                tracing::debug!("[HollowDrive] Lookup query '{}' -> Inode {}. Results present? {}", query, search_inode, has_results);
-                
-                drop(state_guard);
+            
+            // USE INODE STORE
+            let state_guard = self.state.read().unwrap();
+            let inode_store = &state_guard.inode_store;
 
-                if has_results {
-                    // Results are ready
-                    let attr = mk_attr(search_inode, fuser::FileType::Directory);
-                    reply.entry(&ttl, &attr, 0);
-                } else {
-                    // Results not ready. Oracle will pick it up from active_searches.
-                    reply.error(libc::EAGAIN); 
-                }
-                return;
+            let search_inode = inode_store.get_or_create_inode(&query);
+            let has_results = inode_store.has_results(search_inode);
+
+            if !has_results {
+                tracing::debug!("[HollowDrive] Lookup '{}' (Inode {}) -> EAGAIN", query, search_inode);
             }
+            
+            drop(state_guard);
+
+            if has_results {
+                let attr = mk_attr(search_inode, fuser::FileType::Directory);
+                reply.entry(&ttl, &attr, 0);
+            } else {
+                reply.error(libc::EAGAIN); 
+            }
+            return;
         }
 
         // Handle dynamic search result directories (parent is a search inode)
         // Check if parent is a dynamic search inode
-        {
-            let is_search_inode = parent > 3; // All search inodes are > 3
+        if parent > 3 {
+            let state_guard = self.state.read().unwrap();
+            let inode_store = &state_guard.inode_store;
 
-            if is_search_inode {
+            if inode_store.get_query(parent).is_some() {
                 // This is a lookup inside a search results directory
                 // The name should be a score_filename.txt
                 
                 // Generate inode for this search result file
-                let file_inode = self.hash_to_inode(&format!("{}-{}", parent, name_str));
+                let file_inode = inode_store.hash_to_inode(&format!("{}-{}", parent, name_str));
                 let attr = mk_attr(file_inode, fuser::FileType::RegularFile);
                 reply.entry(&ttl, &attr, 0);
                 return;
@@ -206,20 +168,15 @@ impl Filesystem for HollowDrive {
             3 => (fuser::FileType::Directory, 4096, 2),
             // Search result directories (dynamic inodes)
             _ => {
-                // Check if this is a search directory or a search result file
                 let state_guard = self.state.read().map_err(|_| {
                     tracing::error!("[HollowDrive] Failed to acquire read lock for getattr");
                     libc::EIO
                 }).unwrap();
 
-                // If inode is in search_results, it's a search directory
-                // Note: search_results keys are the inodes of the searches
-                if state_guard.search_results.get(&ino).is_some() || state_guard.active_searches.iter().any(|entry| *entry.value() == ino) {
-                    drop(state_guard);
+                // USE INODE STORE
+                if state_guard.inode_store.get_query(ino).is_some() {
                     (fuser::FileType::Directory, 4096, 2)
                 } else {
-                    drop(state_guard);
-                    // Otherwise it's a search result file
                     (fuser::FileType::RegularFile, 1024, 1)
                 }
             }
@@ -290,16 +247,17 @@ impl Filesystem for HollowDrive {
         if ino == 3 {
             let all_entries = entries;
             let mut search_entries = all_entries;
-            // List active searches
+            
+            // List active searches from INODE STORE
             let state_guard = self.state.read().map_err(|_| {
                 tracing::error!("[HollowDrive] Failed to acquire read lock for readdir");
                 libc::EIO
             }).unwrap();
 
-            for entry in state_guard.active_searches.iter() {
-                let query = entry.key();
-                let search_inode = *entry.value();
-                search_entries.push((search_inode, FileType::Directory, query.clone()));
+            let active_queries = state_guard.inode_store.active_queries();
+            
+            for (search_inode, query) in active_queries {
+                search_entries.push((search_inode, FileType::Directory, query));
             }
             drop(state_guard);
 
@@ -314,17 +272,13 @@ impl Filesystem for HollowDrive {
 
         // Dynamic search result directories
         {
-            let results_opt = {
-                let state_guard = self.state.read().map_err(|_| {
-                    tracing::error!("[HollowDrive] Failed to acquire read lock for search readdir");
-                    libc::EIO
-                }).unwrap();
+            let state_guard = self.state.read().map_err(|_| {
+                tracing::error!("[HollowDrive] Failed to acquire read lock for search readdir");
+                libc::EIO
+            }).unwrap();
+            let inode_store = &state_guard.inode_store;
 
-                state_guard.search_results.get(&ino).map(|r| r.clone())
-            };
-
-            if let Some(results) = results_opt {
-                // INSTRUMENTATION: Log that we found results
+            if let Some(results) = inode_store.get_results(ino) {
                 tracing::debug!("[HollowDrive] readdir for Inode {} found {} results", ino, results.len());
                 
                 let mut all_entries = entries;
@@ -334,7 +288,7 @@ impl Filesystem for HollowDrive {
                     // File name format: 0.95_filename.txt
                     let score_str = format!("{:.2}", result.score);
                     let filename = format!("{}_{}", score_str, result.filename);
-                    let file_inode = self.hash_to_inode(&format!("{}-{}", ino, &filename));
+                    let file_inode = inode_store.hash_to_inode(&format!("{}-{}", ino, &filename));
 
                     all_entries.push((file_inode, fuser::FileType::RegularFile, filename));
                 }
@@ -347,8 +301,7 @@ impl Filesystem for HollowDrive {
                 reply.ok();
                 return;
             } else {
-                 // INSTRUMENTATION: Log that we found NO results
-                 tracing::debug!("[HollowDrive] readdir for Inode {} found NO results in search_results map", ino);
+                 tracing::debug!("[HollowDrive] readdir for Inode {} found NO results in inode_store", ino);
             }
         }
 
@@ -394,46 +347,42 @@ impl Filesystem for HollowDrive {
 
         // For search result files (ino > 3), return file content
         if ino > 3 {
+            let state_guard = self.state.read().map_err(|_| {
+                tracing::error!("[HollowDrive] Failed to acquire read lock for read");
+                libc::EIO
+            }).unwrap();
+            let inode_store = &state_guard.inode_store;
+
             // Find which search result file this is
-            // We need to search through all search results to find the matching inode
+            // We iterate active searches to find the owner
+            let queries = inode_store.active_queries();
 
-            let search_results_to_check: Vec<(u64, crate::state::SearchResult)> = {
-                let state_guard = self.state.read().map_err(|_| {
-                    tracing::error!("[HollowDrive] Failed to acquire read lock for read");
-                    libc::EIO
-                }).unwrap();
+            for (search_inode, _) in queries {
+                if let Some(results) = inode_store.get_results(search_inode) {
+                    for result in results {
+                        let score_str = format!("{:.2}", result.score);
+                        let filename = format!("{}_{}", score_str, result.filename);
+                        let expected_inode = inode_store.hash_to_inode(&format!("{}-{}", search_inode, &filename));
 
-                state_guard.search_results.iter()
-                    .flat_map(|entry| {
-                        let inode_num = *entry.key();
-                        entry.value().iter().map(move |result| (inode_num, result.clone())).collect::<Vec<_>>()
-                    })
-                    .collect()
-            };
+                        if expected_inode == ino {
+                            // Found the file - return its content
+                            // Format: "path/to/file.txt\nScore: 0.95"
+                            let content = format!("{}\nScore: {:.2}", result.abs_path, result.score);
+                            let content_bytes = content.as_bytes();
 
-            // Iterate through all search results to find the matching file
-            for (search_inode, result) in search_results_to_check {
-                let score_str = format!("{:.2}", result.score);
-                let filename = format!("{}_{}", score_str, result.filename);
-                let expected_inode = self.hash_to_inode(&format!("{}-{}", search_inode, &filename));
+                            let read_size = size as usize;
+                            let file_size = content_bytes.len();
 
-                if expected_inode == ino {
-                    // Found the file - return its content
-                    // Format: "path/to/file.txt\nScore: 0.95"
-                    let content = format!("{}\nScore: {:.2}", result.abs_path, result.score);
-                    let content_bytes = content.as_bytes();
+                            if offset as usize >= file_size {
+                                reply.data(&[]);
+                                return;
+                            }
 
-                    let read_size = size as usize;
-                    let file_size = content_bytes.len();
-
-                    if offset as usize >= file_size {
-                        reply.data(&[]);
-                        return;
+                            let end = (offset as usize + read_size).min(file_size);
+                            reply.data(&content_bytes[offset as usize..end]);
+                            return;
+                        }
                     }
-
-                    let end = (offset as usize + read_size).min(file_size);
-                    reply.data(&content_bytes[offset as usize..end]);
-                    return;
                 }
             }
         }
