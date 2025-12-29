@@ -278,18 +278,66 @@ impl Oracle {
         Ok(())
     }
 
-    /// Index a file
+    /// Index a file with retry logic for race conditions
     async fn index_file(state: SharedState, file_path: String) -> Result<()> {
         tracing::info!("[Oracle] Indexing file: {}", file_path);
-        let file_path_clone = file_path.clone();
+        
+        let mut text_content = String::new();
+        let max_retries = 5;
+        let mut success = false;
 
-        // Step 1: Extract text
-        let text_content = tokio::task::spawn_blocking(move || {
-            crate::storage::extract_text_from_file(std::path::Path::new(&file_path_clone))
-        }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Text extraction task panic")))??;
+        for attempt in 1..=max_retries {
+            let path_for_task = file_path.clone();
+            
+            // Check metadata to see if we EXPECT content (handle file growing during loop)
+            let file_size = match std::fs::metadata(&file_path) {
+                Ok(m) => m.len(),
+                Err(_) => 0, // If we can't stat it, assume 0 for now
+            };
 
-        if text_content.trim().is_empty() {
-            tracing::warn!("[Oracle] File has no text content: {}", file_path);
+            // Step 1: Extract text (blocking task)
+            let extraction_result = tokio::task::spawn_blocking(move || {
+                crate::storage::extract_text_from_file(std::path::Path::new(&path_for_task))
+            }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Text extraction task panic")))?;
+
+            match extraction_result {
+                Ok(content) => {
+                    // SUCCESS CASE: We got content
+                    if !content.trim().is_empty() {
+                        text_content = content;
+                        success = true;
+                        break; 
+                    }
+                    
+                    // EMPTY CASE: Content is empty. Is it SUPPOSED to be?
+                    if file_size == 0 {
+                        tracing::debug!("[Oracle] File is genuinely empty (size 0): {}", file_path);
+                        return Ok(());
+                    }
+
+                    // RACE CONDITION: Size > 0, but Read == 0. The OS hasn't flushed yet.
+                    if attempt < max_retries {
+                        tracing::debug!("[Oracle] Race detected: File size is {} but read empty. Retrying {}/{}...", file_size, attempt, max_retries);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    // ERROR CASE: File locked or unreadable
+                    if attempt < max_retries {
+                        tracing::debug!("[Oracle] Read failed: {}. Retrying {}/{}...", e, attempt, max_retries);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    // If we failed on final attempt, log it and give up
+                    tracing::warn!("[Oracle] Failed to index file after retries: {}", e);
+                    return Ok(()); 
+                }
+            }
+        }
+
+        if !success || text_content.trim().is_empty() {
+            tracing::warn!("[Oracle] Skipping file (empty content after retries): {}", file_path);
             return Ok(());
         }
 
@@ -362,15 +410,15 @@ fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -
     // We must use a subquery to ensure the LIMIT applies directly to the vec0 virtual table
     // BEFORE joining, otherwise the query optimizer fails to push down the limit
     let query_sql = "
-        SELECT
-            fr.file_id,
-            fr.abs_path,
+        SELECT 
+            fr.file_id, 
+            fr.abs_path, 
             v.distance as score
         FROM (
-            SELECT file_id, distance
-            FROM vec_index
-            WHERE embedding MATCH ?
-            ORDER BY distance
+            SELECT file_id, distance 
+            FROM vec_index 
+            WHERE embedding MATCH ? 
+            ORDER BY distance 
             LIMIT 10
         ) v
         JOIN file_registry fr ON v.file_id = fr.file_id";
