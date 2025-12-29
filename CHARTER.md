@@ -1,3 +1,6 @@
+================================================
+FILE: CHARTER.md
+================================================
 # 📜 The MagicFS Charter
 
 > "The filesystem is the interface."
@@ -42,7 +45,8 @@ MagicFS results are standard files. They must be compatible with `cp`, `grep`, `
 ## 4. Maintenance
 * **Test Driven:** `tests/run_suite.sh` matches the golden rule.
 * **Refactoring:** We refactor in micro-steps.
+* **Unabridged Output:** All code outputs must be complete and unabridged to ensure context is never lost.
 
 ---
 *Adopted: Dec 2025*
-*Version: 2.0 (The Universal Pivot)*
+*Version: 2.1 (The Universal Pivot)*
