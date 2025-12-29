@@ -1,68 +1,120 @@
+
+# ================================================
+FILE: ROADMAP.md
+
 # MagicFS Development Roadmap
 
 ## 🎯 System Philosophy: Fail First
+
 We assume the filesystem is hostile. Files will be huge, permissions will be denied, encoding will be broken, and tools will be impatient. The system must fail safely (by skipping, logging, or deferring) rather than crashing or hanging.
 
 ---
 
-## 🏗️ Architecture: Three-Organ System (Stable)
+## 🏗️ Architecture: Evolution to Service-Based
 
-1. **Hollow Drive** (The Face): Sync FUSE loop. Enforces **The 10ms Law**.
-2. **Oracle** (The Brain): Async. Handles Embeddings & SQLite.
-3. **Librarian** (The Hands): Background watcher. Feeds the Oracle.
+We are transitioning from the "Three-Organ Prototype" (HollowDrive/Oracle/Librarian) to a "Service-Oriented Architecture" (FS/Engine/Watcher/Storage) to improve maintainability and strictly enforce separation of concerns.
 
 ---
 
 ## 📜 Era 1: The Foundation (Completed)
 
 ### ✅ Phase 1: The Scaffold
-- Basic Thread Harness & Shared State.
-- FUSE Skeleton (EAGAIN handling).
+
+* Basic Thread Harness & Shared State.
+* FUSE Skeleton (EAGAIN handling).
 
 ### ✅ Phase 2: The Storage
-- SQLite (WAL mode) & Schema.
-- `file_registry` & `system_config` tables.
+
+* SQLite (WAL mode) & Schema.
+* `file_registry` & `system_config` tables.
 
 ### ✅ Phase 3: The Brain
-- FastEmbed Integration (BAAI/bge-small-en-v1.5).
-- `sqlite-vec` Virtual Table integration.
-- Async embedding pipeline.
+
+* FastEmbed Integration (BAAI/bge-small-en-v1.5).
+* `sqlite-vec` Virtual Table integration.
+* Async embedding pipeline.
 
 ### ✅ Phase 4: The Glue
-- `/search/[query]` Virtual Directory Logic.
-- Dynamic Inode generation.
-- FUSE `read` handlers returning semantic content.
+
+* `/search/[query]` Virtual Directory Logic.
+* Dynamic Inode generation.
+* FUSE `read` handlers returning semantic content.
 
 ### ✅ Phase 5: The Watcher
-- `notify` crate integration.
-- Recursive directory scanning.
-- Debounced event handling.
-- Ignore rule processing (`.magicfsignore`).
+
+* `notify` crate integration.
+* Recursive directory scanning.
+* Debounced event handling.
+* Ignore rule processing (`.magicfsignore`).
 
 ---
 
-## 🛡️ Era 2: Refinement & Hardening (Completed)
+## 🛠️ Era 2: Architecture 2.0 (The Refactor) [ACTIVE]
 
-### ✅ Phase 6: Hardening & Resilience
-**Goal:** Solve "Semantic Dilution" and prevent "The Slurp" (OOM crashes).
+### 🏗️ Phase 6: Structural Maturity [NEXT UP]
+
+**Goal:** Decouple "Data Access", "Business Logic", and "FUSE Interface". Move from monolithic files to domain-specific modules. This prepares the codebase for advanced features like PDF support and caching without creating spaghetti code.
 
 **Micro-Steps:**
-1. [x] **Safety Guards**: Implement file size limits (10MB) and binary detection (null byte check).
-2. [x] **Chunking Architecture**: Refactor `text_extraction` and `vec_index` to support 1-to-Many relationship (1 File = N Chunks).
-3. [x] **Sliding Window Logic**: Implement text chunking (256 chars with 50 char overlap).
-4. [x] **Search Aggregation**: Update SQL query to aggregate chunk scores into a single file score (Max Chunk Score strategy).
-5. [x] **Memory Guardrails**: Add strict limits to the `Oracle`'s embedding channel to prevent queue explosions.
+
+1. [ ] **The Repository Pattern**
+* Create `src/storage/repository.rs`.
+* Migrate raw SQL from `oracle.rs` (search queries) and `file_registry.rs` into `Repository` methods.
+* *Benefit:* Centralized SQL logic; strict typing for DB interactions.
+
+
+2. [ ] **The Inode Store**
+* Create `src/core/inode_store.rs`.
+* Extract `active_searches` and `search_results` maps from `GlobalState`.
+* Centralize the `hash_to_inode` logic here (removing it from `hollow_drive.rs`).
+* *Benefit:* Guarantees Inode consistency between FUSE and the Engine.
+
+
+3. [ ] **Engine Decomposition**
+* Split `src/oracle.rs` into:
+* `orchestrator.rs`: Manages the Tokio runtime/Actor channels.
+* `indexer.rs`: Pure logic for reading files, chunking, and embedding.
+* `searcher.rs`: Pure logic for executing vector searches.
+
+
+* *Benefit:* Testable business logic isolated from threading complexity.
+
+
+4. [ ] **Watcher Standardization**
+* Refactor `src/librarian.rs` to `src/watcher/mod.rs`.
+* Ensure strict typing for events entering the indexing queue.
+
+
+5. [ ] **Directory Restructure**
+* Move files into `src/fs/`, `src/engine/`, `src/storage/`, `src/api/`.
+
+
 
 ---
 
-## 🔮 Era 3: Polish & Performance [NEXT]
+## 🛡️ Era 3: Resilience & Features
 
-### 🔄 Phase 7: Compatibility & Polish [ACTIVE]
+### 🔒 Phase 7: Hardening & Resilience
+
+**Goal:** Solve "Semantic Dilution" and ensure production-grade stability.
+
+**Micro-Steps:**
+
+1. [x] **Safety Guards**: Implement file size limits (10MB) and binary detection. (Completed).
+2. [x] **Chunking Architecture**: Refactor schema to support 1-to-Many relationship. (Completed).
+3. [x] **Sliding Window Logic**: Implement text splitting logic. (Completed).
+4. [x] **Basic Aggregation**: SQL query to group chunks by file. (Completed).
+5. [ ] **Refined Aggregation**: Experiment with "Max Score" vs "Avg Score" strategies for better relevance.
+6. [ ] **Memory Guardrails**: strict limits on `Oracle`'s embedding channel to prevent queue explosions.
+
+### 🔮 Phase 8: Compatibility & Polish [FUTURE]
+
 **Goal:** Make MagicFS behave nicely with standard Unix tools.
 
 **Micro-Steps:**
+
 1. [ ] **LRU Caching**: Evict old search results from RAM to keep footprint low.
-2. [ ] **Extended File Support**: Add PDF/DOCX support (via `pdf-extract` or similar).
+2. [ ] **Rich File Support**: Add PDF/DOCX support (via `pdf-extract` or similar).
 3. [ ] **Blocking Mode**: Optional CLI flag to make `lookup` block instead of EAGAIN (for dumb script compatibility).
 4. [ ] **Daemon Mode**: Run as a background service.
 
