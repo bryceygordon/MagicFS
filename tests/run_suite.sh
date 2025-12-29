@@ -72,7 +72,12 @@ for test_file in tests/cases/*.py; do
     if [ $RESULT -ne 0 ]; then
         restore_term
         echo -e "\n❌ TEST FAILED: $(basename "$test_file")"
-        # Logs are now dumped by the Python script itself
+        
+        # FAILSAFE: Dump logs via bash if Python didn't do it
+        echo "--- LOG SUMMARY (Last 100 lines) ---"
+        if [ -f "$LOG_FILE" ]; then
+            tail -n 100 "$LOG_FILE"
+        fi
         exit 1
     fi
 done

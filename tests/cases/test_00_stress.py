@@ -69,9 +69,13 @@ print(f"DB Count after deletion: {current_count}")
 # ---------------------------------------------------------
 print("\n[Phase 3] The Startup Storm (Efficiency Audit)")
 
+# CRITICAL FIX: Wait for SQLite WAL to settle/flush before killing.
+# If we kill too fast, the last few inserts might not be checkpointed, 
+# causing them to look "new" on restart.
+print("Waiting for DB consistency...")
+time.sleep(3) 
+
 print("Stopping MagicFS daemon...")
-# FIX: Use sudo pkill -x to match the process name EXACTLY 
-# so we don't kill this script by accident.
 subprocess.run(["sudo", "pkill", "-x", "magicfs"])
 time.sleep(2)
 
@@ -113,15 +117,10 @@ print(f"Final DB Count: {final_zombie_count}")
 print("\n[Phase 4] Cache Thrashing (LRU Verification)")
 print("Generating 100 unique search queries to force eviction...")
 
-# We know the LRU limit is 50 (from InodeStore).
-# Sending 100 queries ensures we cycle the cache twice.
-# If the Mutex implementation is wrong, this might deadlock or crash.
-
 for i in range(100):
     query = f"stress_query_{i}"
     search_path = os.path.join(test.mount_point, "search", query)
     try:
-        # Just triggering the lookup is enough to touch the cache
         if os.path.exists(search_path):
             pass
     except OSError:
@@ -132,7 +131,7 @@ for i in range(100):
 
 print("✅ Sent 100 queries. Daemon should still be responsive.")
 
-# Verify responsiveness with a real search
+# Verify responsiveness
 test.create_file("lru_canary.txt", "The system is still alive")
 test.wait_for_indexing("lru_canary.txt")
 try:
@@ -140,28 +139,26 @@ try:
     print("✅ System survived cache thrashing.")
 except SystemExit:
     print("❌ FAILURE: System died after cache thrashing.")
+    test.dump_logs()
     exit(1)
 
 
 print("\n--- RESULTS ---")
-# EVALUATION
 failed = False
 
 # 1. Efficiency
 if re_indexed_count > 5:
     print(f"⚠️  EFFICIENCY FAILURE: Re-indexed {re_indexed_count} unchanged files! (The Startup Storm)")
+    test.dump_logs()
     failed = True
 else:
     print("✅ Efficiency Pass: Minimal re-indexing.")
 
 # 2. Consistency
-# Initial 50 - 10 (Phase 2) - 1 (Phase 3 dead delete) = 39 expected
-# But we added 1 canary in Phase 4 = 40 expected
 expected_clean_count = FILE_COUNT - 11 + 1 
-
-# Allow +/- 1 for timing variations, but check logic
 if abs(final_zombie_count - expected_clean_count) > 2:
     print(f"⚠️  CONSISTENCY FAILURE: DB has {final_zombie_count} entries, expected approx {expected_clean_count}.")
+    test.dump_logs()
     failed = True
 else:
     print("✅ Consistency Pass: Zombie count matches expectations.")
