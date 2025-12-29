@@ -1,58 +1,41 @@
 # MagicFS Development Roadmap
 
-## 🎯 System Philosophy: Fail First
+## 🎯 Vision: The Universal Reader
 
-We assume the filesystem is hostile. Files will be huge, permissions will be denied, and tools will be impatient. The system must fail safely rather than crashing or hanging.
-
----
-
-## 🏗️ Architecture: Service-Based (Current)
-
-The system has evolved from a simple prototype to a Service-Oriented Architecture:
-
-1.  **Hollow Drive (`fs/`)**: The "Face". Dumb, synchronous FUSE loop.
-2.  **The Orchestrator (`oracle.rs`)**: The "Manager". Routes messages, manages the Actor.
-3.  **The Engine (`engine/`)**: The "Worker".
-    * **Indexer**: Handles file reading, chunking, and database writes.
-    * **Searcher**: Handles embedding generation and database reads.
-4.  **The Librarian (`librarian.rs`)**: The "Eyes". Watches for file events.
-5.  **The Repository (`storage/`)**: The "Memory". Encapsulates all SQL logic.
+We are building the "Context Layer" of the OS. The goal is to allow users to manipulate files based on *meaning*, not just location, regardless of whether the file is a text file, a PDF, or a Word doc.
 
 ---
 
 ## 📜 History
-
-### ✅ Era 1: The Foundation (Phases 1-5)
-* Established basic FUSE loop, SQLite storage, and FastEmbed integration.
-* Implemented "Three-Organ" prototype.
-
-### ✅ Era 2: Architecture 2.0 (Phase 6)
-* **Refactor**: Split monolithic `Oracle` into `Engine` modules.
-* **Hardening**: Added binary detection, 10MB limits, and sliding window chunking.
-* **Consistency**: Introduced `InodeStore` to guarantee valid file handles.
+* **Phases 1-5 (Foundation)**: Basic FUSE, SQLite, FastEmbed.
+* **Phase 6 (Hardening)**: "Three-Organ" Architecture, Chunking, Binary Safety.
 
 ---
 
-## 🛡️ Era 3: Production Readiness [ACTIVE]
+## 🛡️ Era 3: Utility [ACTIVE]
 
-### 🔮 Phase 7: Polish & Compatibility
+### 🔮 Phase 7: The Universal Reader (Current Priority)
+**Goal:** Break the "Format Barrier". Users generally store high-value knowledge in PDFs and DOCX, not just `.txt`.
 
-**Goal:** Transform MagicFS from a "functional prototype" to a "usable daily tool".
+1.  **Rich Media Ingestion**:
+    * Integrate `pdf-extract` for PDFs.
+    * Integrate `dotext` for Office Documents (DOCX/XLSX).
+    * *Success Metric:* `test_06_rich_media.py` finds a needle inside a PDF.
+2.  **Contextual Visibility**:
+    * Experiment: Virtual files (e.g., `file.pdf.summary`) that show *why* a match occurred.
 
-1.  [ ] **LRU Caching**:
-    * `InodeStore` currently grows forever.
-    * Implement an eviction policy (remove search results not accessed in X minutes).
-2.  [ ] **Daemonization**:
-    * Allow running `magicfs mountpoint &` properly.
-3.  [ ] **Rich Media Support**:
-    * Integrate `pdf-extract` for PDF parsing.
-    * Integrate `docx-rs` for Word documents.
-4.  [ ] **Installation**:
-    * Create a simple `install.sh` script and systemd service file.
+### 🔮 Phase 8: Persistence & Workflows
+**Goal:** Transform from "Search Tool" to "Organization System".
+
+1.  **Write Support (The "Config Filesystem")**:
+    * Allow `mkdir` in `/saved/`.
+    * Allow writing to `.query` files to define folders.
+2.  **Saved Views**:
+    * Persist these folder definitions to `~/.magicfs/saved_views.db`.
+    * *Scenario:* `mkdir /magic/saved/Tax2024` -> Auto-populates with all tax docs.
 
 ---
 
 ## 📏 Critical Constraints
-
-1.  **The 10ms Law**: FUSE ops must never block >10ms.
-2.  **Memory Cap**: The system should never exceed ~500MB RAM.
+1.  **Memory Cap**: ~500MB RAM. (Parsing PDFs can be heavy; we must stream or chunk aggressively).
+2.  **Dependency Weight**: Avoid `libpoppler` if possible, but prioritize correctness for now.
