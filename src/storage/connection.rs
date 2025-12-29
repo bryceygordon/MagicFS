@@ -1,3 +1,4 @@
+// FILE: src/storage/connection.rs
 //! Database connection management
 //!
 //! Provides lazy initialization and connection management for the database.
@@ -41,10 +42,15 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     let conn = Connection::open(db_path)
         .map_err(crate::error::MagicError::Database)?;
 
-    // Performance Pragma
+    // Performance & Concurrency Pragmas
+    // WAL mode allows readers (Searcher) not to block writers (Indexer)
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    
+    // CRITICAL FIX: Set busy_timeout to 5000ms.
+    // This prevents "Database Busy" errors when Indexer and Searcher collide.
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
     // Use Repository to init schema
     // We create a temporary Repository just for this init step

@@ -18,9 +18,10 @@ impl Indexer {
     pub async fn index_file(state: SharedState, file_path: String) -> Result<()> {
         tracing::info!("[Indexer] Processing: {}", file_path);
         
-        // 1. Extraction (with retries for file locks)
+        // 1. Extraction (with retries for file locks AND partial writes)
         let text_content = Self::extract_with_retry(&file_path).await?;
         if text_content.trim().is_empty() {
+            tracing::debug!("[Indexer] Skipping empty or binary file: {}", file_path);
             return Ok(());
         }
 
@@ -92,13 +93,26 @@ impl Indexer {
     }
 
     async fn extract_with_retry(path: &str) -> Result<String> {
-        let max_retries = 5;
+        let max_retries = 10; // Increased retries
+        let mut last_error = None;
+
         for attempt in 1..=max_retries {
             let path_owned = path.to_string();
             
-            // Check zero byte file before trying to read
+            // Check metadata size first
+            // CRITICAL FIX: If size is 0, we treat it as a "Retry" condition, not a success.
+            // Files are often created as 0 bytes before content is flushed.
             if let Ok(m) = std::fs::metadata(path) {
-                if m.len() == 0 { return Ok(String::new()); }
+                if m.len() == 0 { 
+                    if attempt < max_retries {
+                        tracing::debug!("[Indexer] File {} is 0 bytes (attempt {}/{}), waiting for data...", path, attempt, max_retries);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    } else {
+                        // Truly empty file after 10 attempts (500ms)
+                        return Ok(String::new());
+                    }
+                }
             }
 
             let result = tokio::task::spawn_blocking(move || {
@@ -107,17 +121,23 @@ impl Indexer {
 
             match result {
                 Ok(content) => {
-                    if !content.trim().is_empty() { return Ok(content); }
-                    // If empty, might be transient lock or actually empty.
-                    // If actually empty, return ok.
-                    if attempt == max_retries { return Ok(String::new()); }
+                    if !content.trim().is_empty() { 
+                        return Ok(content); 
+                    }
+                    // If content is empty (but size wasn't 0?), it might be binary or just whitespace.
+                    // We can accept it, but if it was a read error, we retry.
                 },
-                Err(_) => {
-                    if attempt == max_retries { return Ok(String::new()); }
+                Err(e) => {
+                    last_error = Some(e);
                 }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            
+            // Backoff
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        
+        // If we failed after all retries, return empty string (soft fail) or error
+        tracing::warn!("[Indexer] Failed to extract text from {} after retries. Last error: {:?}", path, last_error);
         Ok(String::new())
     }
 

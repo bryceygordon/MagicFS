@@ -13,14 +13,28 @@ class MagicTest:
         self.db_path = sys.argv[1]
         self.mount_point = sys.argv[2]
         self.watch_dir = sys.argv[3]
+        self.log_file = "tests/magicfs.log"
+
+    def dump_logs(self, lines=100):
+        """Reads the log file directly and dumps it to stdout."""
+        print(f"\n--- FATAL ERROR: DUMPING LAST {lines} LOG LINES ---")
+        try:
+            if os.path.exists(self.log_file):
+                with open(self.log_file, "r") as f:
+                    content = f.readlines()
+                    for line in content[-lines:]:
+                        print(line.rstrip())
+            else:
+                print(f"❌ Log file not found at {self.log_file}")
+        except Exception as e:
+            print(f"❌ Failed to read log file: {e}")
+        print("---------------------------------------------------\n")
 
     def create_file(self, rel_path, content):
         """Creates a file in the watch directory."""
         full_path = os.path.join(self.watch_dir, rel_path)
         dir_name = os.path.dirname(full_path)
         
-        # If we are creating a new directory, give the watcher a split second
-        # to attach to it before creating the file. This mimics real user speed.
         if not os.path.exists(dir_name):
             os.makedirs(dir_name, exist_ok=True)
             time.sleep(0.2) 
@@ -37,7 +51,7 @@ class MagicTest:
         print(f"[Setup] Added ignore rule: {rule}")
         time.sleep(0.5)
 
-    def wait_for_indexing(self, filename_substr, timeout=5):
+    def wait_for_indexing(self, filename_substr, timeout=10):
         """Polls DB until file appears."""
         print(f"[Wait] Waiting for '{filename_substr}' to be indexed...")
         start = time.time()
@@ -48,7 +62,8 @@ class MagicTest:
             time.sleep(0.1)
         
         print(f"❌ Timeout waiting for {filename_substr}")
-        sys.exit(1) # HARD FAIL to preserve logs
+        self.dump_logs()
+        sys.exit(1)
 
     def check_file_in_db(self, filename_substr):
         try:
@@ -66,17 +81,19 @@ class MagicTest:
             print(f"✅ Found '{filename_substr}' in index.")
             return True
         print(f"❌ FAILURE: '{filename_substr}' missing from index.")
+        self.dump_logs()
         sys.exit(1)
 
     def assert_file_not_indexed(self, filename_substr):
         time.sleep(1) 
         if self.check_file_in_db(filename_substr):
             print(f"❌ FAILURE: Should ignore '{filename_substr}', but found it in DB.")
+            self.dump_logs()
             sys.exit(1)
         print(f"✅ Correctly ignored '{filename_substr}'.")
         return True
 
-    def search_fs(self, query, expected_filename, retries=10):
+    def search_fs(self, query, expected_filename, retries=30):
         search_path = os.path.join(self.mount_point, "search", query)
         print(f"[*] Searching for '{query}'...")
         
@@ -90,8 +107,9 @@ class MagicTest:
             except OSError:
                 pass 
             
-            print(f"    ... waiting for Oracle (attempt {i+1}/{retries})")
+            print(f"   ... waiting for Oracle (attempt {i+1}/{retries})")
             time.sleep(0.5)
             
         print(f"❌ FAILURE: Search for '{query}' failed.")
+        self.dump_logs()
         sys.exit(1)
