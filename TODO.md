@@ -1,11 +1,29 @@
 ================================================
 FILE: TODO.md
 ================================================
-# MagicFS Task List
-
 ## ✅ Completed Phases
 * [x] **Phases 1-5**: Foundation, FUSE Loop, Basic Search.
-* [x] **Phase 6**: Hardening, Binary Safety, Chunking.
+
+# MagicFS Task List
+
+## 🔴 CRITICAL BLOCKER: The "Safe.txt" Race Condition
+**Context:** `test_07_real_world.py` Scenario 1 fails. We destroy a folder and rebuild it immediately. The DB ends up empty (missing `safe.txt`).
+
+**The Diagnosis (The Electrician's View):**
+We suspect the "Stop" button (Delete Event) is being pressed *after* the "Start" button (Create Event) due to event queue ordering, cancelling out the valid file.
+
+**Current Hardening (Already Implemented):**
+1.  **Librarian:** Debounce increased to 500ms.
+2.  **Oracle:** "Lockout" logic ensures `safe.txt` and `DELETE:safe.txt` cannot run in the same tick.
+3.  **Indexer:** "Arbitrator" check (`Path::exists`) prevents deleting a file if it currently exists on disk.
+
+**⚠️ The Anomaly:**
+Despite these 3 safety mechanisms, `safe.txt` is *still* missing.
+
+**Next Steps (For Tomorrow):**
+1.  **Verify Disk State in Test:** Modify `test_07` failure message. Is `safe.txt` actually on disk? If yes, and not in DB, the Indexer failed to run. If no, the Indexer *deleted* it (Arbitrator failed).
+2.  **Debug The Lockout:** Is the Oracle correctly identifying `trap/safe.txt` and `DELETE:trap/safe.txt` as the same resource? (Check path string normalization/prefixes).
+3.  **Debug The Arbitrator:** Add logging to `Indexer::remove_file`. Is it actually hitting the `exists()` check? Is there a timing window where `exists()` returns false (during the split second of rebuilding) but the file is created 1ms later?
 
 ---
 
