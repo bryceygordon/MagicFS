@@ -1,28 +1,25 @@
 // FILE: src/oracle.rs
-//! Oracle: The Async Brain
+//! Oracle: The Async Brain (Orchestrator)
 //!
-//! Handles Vector Search (fastembed-rs) and SQLite (sqlite-vec).
-//! Populates the Memory Cache for the Hollow Drive.
-//!
-//! HARDENING:
-//! - Implements 1-to-Many Chunking logic (Index Loop).
-//! - Implements Score Aggregation (Max Chunk Score).
-//! - Refactored to use Repository Pattern (Phase 6.1).
-//! - Refactored to use InodeStore (Phase 6.2).
+//! Refactored in Phase 6.3.
+//! Role:
+//! 1. Manages the Thread/Actor Lifecycle.
+//! 2. Monitors the Event Loop.
+//! 3. Delegates work to `Indexer` and `Searcher`.
 
-use crate::state::{SharedState, SearchResult, EmbeddingRequest};
+use crate::state::{SharedState, EmbeddingRequest};
 use crate::error::{Result, MagicError};
-use crate::storage::Repository;
+use crate::engine::indexer::Indexer;
+use crate::engine::searcher::Searcher;
+
 use tokio::task::JoinHandle;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use rusqlite::Connection;
 use anyhow;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-/// The Oracle: async brain for semantic search
 pub struct Oracle {
     pub state: SharedState,
     pub runtime: Arc<tokio::runtime::Runtime>,
@@ -45,10 +42,10 @@ impl Oracle {
         self.start_embedding_actor()?;
         let state = Arc::clone(&self.state);
         let handle = self.runtime.spawn(async move {
-            Oracle::run_task(state).await;
+            Oracle::run_event_loop(state).await;
         });
         self.task_handle = Some(handle);
-        tracing::info!("[Oracle] Started async task");
+        tracing::info!("[Oracle] Started Orchestrator loop");
         Ok(())
     }
 
@@ -87,8 +84,8 @@ impl Oracle {
         Ok(())
     }
 
-    async fn run_task(state: SharedState) {
-        tracing::info!("[Oracle] Async task started");
+    async fn run_event_loop(state: SharedState) {
+        tracing::info!("[Oracle] Event loop active");
 
         // Wait for actor
         let mut actor_ready = false;
@@ -107,34 +104,26 @@ impl Oracle {
 
         let mut processed_queries: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut processed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
-        // Track the version of the index we last saw
         let mut last_index_version = 0;
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // 1. Check if Index Version Changed
-            // If the index changed (files added/removed), we wiped the caches.
-            // We must clear `processed_queries` so we retry any active searches.
+            // 1. Check for Index Changes (Cache Invalidation)
             let current_index_version = {
                 let state_guard = state.read().unwrap();
                 state_guard.index_version.load(Ordering::Relaxed)
             };
 
             if current_index_version != last_index_version {
-                tracing::debug!("[Oracle] Index version changed ({} -> {}). Resetting processed_queries.", last_index_version, current_index_version);
+                tracing::debug!("[Oracle] Index version changed. Resetting processed_queries.");
                 processed_queries.clear();
                 
-                // USE INODE STORE TO CLEAR RESULTS
-                let state_guard = state.read().unwrap();
-                state_guard.inode_store.clear_results();
-                drop(state_guard);
-
+                // Note: The InodeStore is cleared by the Indexer, but we ensure consistency here
                 last_index_version = current_index_version;
             }
 
-            // 2. Process Searches
+            // 2. Identify Pending Searches
             let queries_to_process: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 state_guard.inode_store.active_queries()
@@ -146,7 +135,7 @@ impl Oracle {
                     .collect()
             };
 
-            // 3. Process Files
+            // 3. Identify Pending Files
             let files_to_process: Vec<String> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let mut files_to_index_lock = state_guard.files_to_index.lock().unwrap_or_else(|e| e.into_inner());
@@ -155,84 +144,42 @@ impl Oracle {
                     .collect()
             };
 
+            // 4. Dispatch Search Tasks
             for (query, inode_num) in queries_to_process {
-                tracing::debug!("[Oracle] Picked up query: '{}' (inode: {})", query, inode_num);
-                let state_to_process = Arc::clone(&state);
+                let state_ref = Arc::clone(&state);
                 processed_queries.insert(query.clone());
+                
                 tokio::spawn(async move {
-                    if let Err(e) = Oracle::process_search_query(state_to_process, query, inode_num).await {
-                        tracing::error!("[Oracle] Error processing search: {}", e);
+                    if let Err(e) = Searcher::perform_search(state_ref, query, inode_num).await {
+                        tracing::error!("[Oracle] Search failed: {}", e);
                     }
                 });
             }
 
+            // 5. Dispatch Indexing Tasks
             for file_path in files_to_process {
-                let state_to_process = Arc::clone(&state);
+                let state_ref = Arc::clone(&state);
+                
                 if file_path.starts_with("DELETE:") {
                     let actual_path = file_path.trim_start_matches("DELETE:").to_string();
                     processed_files.insert(file_path.clone());
+                    
                     tokio::spawn(async move {
-                        if let Err(e) = Oracle::handle_file_delete(state_to_process, actual_path).await {
-                            tracing::error!("[Oracle] Error handling file delete: {}", e);
+                        if let Err(e) = Indexer::remove_file(state_ref, actual_path).await {
+                            tracing::error!("[Oracle] File removal failed: {}", e);
                         }
                     });
                 } else {
                     processed_files.insert(file_path.clone());
+                    
                     tokio::spawn(async move {
-                        if let Err(e) = Oracle::index_file(state_to_process, file_path).await {
-                            tracing::error!("[Oracle] Error indexing file: {}", e);
+                        if let Err(e) = Indexer::index_file(state_ref, file_path).await {
+                            tracing::error!("[Oracle] Indexing failed: {}", e);
                         }
                     });
                 }
             }
         }
-    }
-
-    async fn process_search_query(state: SharedState, query: String, expected_inode: u64) -> Result<()> {
-        let results = Oracle::perform_vector_search(state.clone(), query.clone()).await?;
-
-        // Verify inode is still valid using InodeStore
-        let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-        let current_inode = state_guard.inode_store.get_or_create_inode(&query);
-        
-        if current_inode != expected_inode {
-             tracing::warn!("[Oracle] Inode mismatch for query '{}'. Expected: {}, Found: {}. Updating anyway.", query, expected_inode, current_inode);
-        }
-
-        // Store via InodeStore
-        state_guard.inode_store.put_results(current_inode, results);
-        tracing::info!("[Oracle] Stored results for query '{}' under inode {}", query, current_inode);
-        Ok(())
-    }
-
-    async fn perform_vector_search(state: SharedState, query: String) -> Result<Vec<SearchResult>> {
-        let query_embedding = Oracle::request_embedding(&state, query.clone()).await?;
-
-        let state_for_search = state.clone();
-        let results = tokio::task::block_in_place(move || {
-            let state_guard = state_for_search.read()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock()
-                .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_ref = conn_lock.as_ref()
-                .ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-
-            perform_sqlite_vector_search(conn_ref, &query_embedding)
-        })?;
-
-        Ok(results)
-    }
-
-    async fn request_embedding(state: &SharedState, content: String) -> Result<Vec<f32>> {
-        let tx = {
-            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let tx_guard = state_guard.embedding_tx.read().unwrap();
-            tx_guard.clone().ok_or_else(|| MagicError::Embedding("Actor not ready".into()))?
-        };
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let req = EmbeddingRequest { content, respond_to: resp_tx };
-        tx.send(req).await.map_err(|_| MagicError::Embedding("Actor channel closed".into()))?;
-        resp_rx.await.map_err(|_| MagicError::Embedding("Actor dropped request".into()))?
     }
 
     pub async fn stop(&mut self) -> Result<()> {
@@ -242,138 +189,6 @@ impl Oracle {
         }
         Ok(())
     }
-
-    async fn index_file(state: SharedState, file_path: String) -> Result<()> {
-        tracing::info!("[Oracle] Indexing file: {}", file_path);
-        
-        let mut text_content = String::new();
-        let max_retries = 5;
-        let mut success = false;
-
-        for attempt in 1..=max_retries {
-            let path_for_task = file_path.clone();
-            let file_size = match std::fs::metadata(&file_path) {
-                Ok(m) => m.len(),
-                Err(_) => 0,
-            };
-
-            let extraction_result = tokio::task::spawn_blocking(move || {
-                crate::storage::extract_text_from_file(std::path::Path::new(&path_for_task))
-            }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Text extraction task panic")))?;
-
-            match extraction_result {
-                Ok(content) => {
-                    if !content.trim().is_empty() {
-                        text_content = content;
-                        success = true;
-                        break; 
-                    }
-                    if file_size == 0 { return Ok(()); } 
-                    
-                    if attempt < max_retries {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                },
-                Err(_) => {
-                    if attempt < max_retries {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                    return Ok(()); 
-                }
-            }
-        }
-
-        if !success || text_content.trim().is_empty() {
-            return Ok(());
-        }
-
-        // --- Chunking Logic ---
-        let chunks = crate::storage::text_extraction::chunk_text(&text_content);
-        if chunks.is_empty() { return Ok(()); }
-
-        tracing::debug!("[Oracle] File {} split into {} chunks", file_path, chunks.len());
-
-        // --- Repository: Register File & Clean Old Data ---
-        let (file_id, _inode) = {
-            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            let repo = Repository::new(conn);
-
-            let inode = file_path.len() as u64 + 0x100000; // Mock inode logic
-            let metadata = std::fs::metadata(&file_path).map_err(MagicError::Io)?;
-            let mtime = metadata.modified().map_err(MagicError::Io)?.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            let size = metadata.len();
-            let is_dir = metadata.is_dir();
-
-            let fid = repo.register_file(
-                &file_path, inode, mtime, size, is_dir
-            )?;
-            
-            // Critical: Clean old chunks before inserting new ones
-            repo.delete_embeddings_for_file(fid)?;
-            
-            (fid, inode)
-        };
-
-        // --- Repository: Insert New Chunks ---
-        for chunk in chunks {
-            let embedding = Oracle::request_embedding(&state, chunk).await?;
-            
-            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            let repo = Repository::new(conn);
-
-            if let Err(e) = repo.insert_embedding(file_id, &embedding) {
-                tracing::warn!("[Oracle] Failed to insert chunk: {}", e);
-            }
-        }
-
-        Oracle::invalidate_caches_after_index(state.clone(), file_path.clone())?;
-        tracing::info!("[Oracle] Indexed {} ({} chunks)", file_path, file_id);
-        Ok(())
-    }
-
-    fn invalidate_caches_after_index(state: SharedState, _file_path: String) -> Result<()> {
-        let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-        state_guard.inode_store.clear_results();
-        state_guard.index_version.fetch_add(1, Ordering::Relaxed); // Signal invalidation
-        Ok(())
-    }
-
-    fn invalidate_caches_after_delete(state: SharedState, _file_path: String) -> Result<()> {
-        let state_guard = state.write().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-        state_guard.inode_store.clear_results();
-        state_guard.index_version.fetch_add(1, Ordering::Relaxed); // Signal invalidation
-        Ok(())
-    }
-
-    async fn handle_file_delete(state: SharedState, file_path: String) -> Result<()> {
-        // --- Repository: Delete File ---
-        {
-            let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            let repo = Repository::new(conn);
-
-            if let Some(record) = repo.get_file_by_path(&file_path)? {
-                repo.delete_embeddings_for_file(record.file_id)?;
-                repo.delete_file(&file_path)?;
-            }
-        }
-        
-        Oracle::invalidate_caches_after_delete(state.clone(), file_path)?;
-        Ok(())
-    }
-}
-
-// Replaced raw SQL logic with Repository call
-fn perform_sqlite_vector_search(db_conn: &Connection, query_embedding: &[f32]) -> Result<Vec<SearchResult>> {
-    let repo = Repository::new(db_conn);
-    repo.search(query_embedding, 20)
 }
 
 impl Drop for Oracle {
