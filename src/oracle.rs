@@ -1,14 +1,14 @@
 // FILE: src/oracle.rs
 //! Oracle: The Async Brain (Orchestrator)
 //!
-//! Refactored in Phase 6.8 (The Arbitrator & Lockout).
+//! Refactored in Phase 6.9 (The Lockout/Tagout System).
 //! Role:
 //! 1. Manages the Thread/Actor Lifecycle.
 //! 2. Monitors the Event Loop.
 //! 3. Delegates work to `Indexer` and `Searcher`.
 //! 4. Enforces Concurrency Limits via Semaphores.
 //! 5. PRIORITIZES Indexing.
-//! 6. ENFORCES SERIALIZATION per file (Lockout).
+//! 6. ENFORCES SERIALIZATION per file (The "Foreman & Radio").
 
 use crate::state::{SharedState, EmbeddingRequest};
 use crate::error::{Result, MagicError};
@@ -24,6 +24,7 @@ use anyhow;
 use std::time::Duration;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::collections::HashSet;
 
 // Hardening: Concurrency Limits
 const MAX_CONCURRENT_INDEXERS: usize = 2;
@@ -119,12 +120,13 @@ impl Oracle {
         }
 
         let mut processed_queries: LruCache<String, ()> = LruCache::new(NonZeroUsize::new(1000).unwrap());
-        
-        // LOCKOUT TAGOUT: This Set tracks files currently "Under Maintenance".
-        // We store the CANONICAL path (without "DELETE:" prefix).
-        let mut active_jobs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
         let mut last_index_version = 0;
+
+        // LOCKOUT/TAGOUT SYSTEM
+        // The Ledger: Tracks files currently being processed.
+        let mut active_jobs: HashSet<String> = HashSet::new();
+        // The Radio: Workers report back here when done.
+        let (completion_tx, mut completion_rx) = mpsc::channel::<String>(100);
 
         let index_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_INDEXERS));
         let search_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SEARCHERS));
@@ -145,24 +147,21 @@ impl Oracle {
                 last_index_version = current_index_version;
             }
 
+            // 2. THE RADIO CHECK (Update The Ledger)
+            // Drain all "Job Complete" messages from the workers
+            while let Ok(finished_path) = completion_rx.try_recv() {
+                // tracing::debug!("[Oracle] Worker finished: {}", finished_path);
+                active_jobs.remove(&finished_path);
+            }
+
             // ----------------------------------------------------------------
             // PRIORITY 1: INDEXING
             // ----------------------------------------------------------------
             
             let mut unprocessed_files: Vec<String> = Vec::new();
             
-            // Clean up the Lockout Set: 
-            // Ideally we'd remove items when tasks finish. 
-            // For now, in this simple loop, we clear it at start of cycle? 
-            // NO. Tasks are async. We need to track them.
-            // Simplified approach for Phase 6.8:
-            // Since we don't have a callback channel from workers yet, 
-            // and we spawn tasks that detach, we rely on the fact that
-            // "files_to_process" drains the queue. 
-            // The race condition happens when we pop multiple items for the SAME file in one tick.
-            
-            // We clear local tracking for *this tick*.
-            let mut tick_locked_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // We clear local tick tracking (prevent double-booking in a single batch)
+            let mut tick_locked_files: HashSet<String> = HashSet::new();
 
             let files_to_process: Vec<String> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
@@ -175,46 +174,56 @@ impl Oracle {
             };
 
             for file_path in files_to_process {
-                // LOCKOUT LOGIC:
-                let canonical_path = file_path.trim_start_matches("DELETE:").to_string();
+                // Determine Canonical Path (strip "DELETE:" prefix)
+                let (canonical_path, is_delete) = if file_path.starts_with("DELETE:") {
+                    (file_path.trim_start_matches("DELETE:").to_string(), true)
+                } else {
+                    (file_path.clone(), false)
+                };
                 
-                if tick_locked_files.contains(&canonical_path) {
-                    // Another ticket for this file is already running in this batch.
-                    // Wait your turn (next tick).
+                // CHECK THE BOARD: Is this file already being worked on?
+                if active_jobs.contains(&canonical_path) || tick_locked_files.contains(&canonical_path) {
+                    // Locked out. Push back to queue and wait for radio call.
                     unprocessed_files.push(file_path);
                     continue;
                 }
                 
-                // Tag it out
+                // TAG OUT: Lock the file
+                active_jobs.insert(canonical_path.clone());
                 tick_locked_files.insert(canonical_path.clone());
                 
                 let state_ref = Arc::clone(&state);
+                let tx = completion_tx.clone();
+                let path_for_radio = canonical_path.clone();
 
-                // DELETEs are cheap/fast, bypass semaphore to prevent "Delete Starvation"
-                if file_path.starts_with("DELETE:") {
-                    let actual_path = file_path.trim_start_matches("DELETE:").to_string();
+                // SPAWN WORKER (With Radio)
+                if is_delete {
+                    // DELETE Task
                     tokio::spawn(async move {
-                        if let Err(e) = Indexer::remove_file(state_ref, actual_path).await {
+                        if let Err(e) = Indexer::remove_file(state_ref, path_for_radio.clone()).await {
                             tracing::error!("[Oracle] File removal failed: {}", e);
                         }
+                        // Radio back: "I'm done"
+                        let _ = tx.send(path_for_radio).await;
                     });
-                    continue;
-                }
-
-                // INDEX operations need a permit
-                match index_semaphore.clone().try_acquire_owned() {
-                    Ok(permit) => {
-                         tokio::spawn(async move {
-                            let _permit = permit; 
-                            if let Err(e) = Indexer::index_file(state_ref, file_path).await {
-                                tracing::error!("[Oracle] Indexing failed: {}", e);
-                            }
-                        });
-                    },
-                    Err(_) => {
-                        // Semaphore full. Release lock (conceptually) and re-queue.
-                        // Since we are re-queuing, we effectively "unlock" it for next tick.
-                        unprocessed_files.push(file_path);
+                } else {
+                    // INDEX Task (Needs Semaphore)
+                    match index_semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                             tokio::spawn(async move {
+                                let _permit = permit; 
+                                if let Err(e) = Indexer::index_file(state_ref, file_path).await {
+                                    tracing::error!("[Oracle] Indexing failed: {}", e);
+                                }
+                                // Radio back: "I'm done"
+                                let _ = tx.send(path_for_radio).await;
+                            });
+                        },
+                        Err(_) => {
+                            // Semaphore full. Release lock in Ledger and re-queue.
+                            active_jobs.remove(&canonical_path); 
+                            unprocessed_files.push(file_path);
+                        }
                     }
                 }
             }
