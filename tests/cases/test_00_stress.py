@@ -69,15 +69,17 @@ print(f"DB Count after deletion: {current_count}")
 # ---------------------------------------------------------
 print("\n[Phase 3] The Startup Storm (Efficiency Audit)")
 
-# CRITICAL FIX: Wait for SQLite WAL to settle/flush before killing.
-# If we kill too fast, the last few inserts might not be checkpointed, 
-# causing them to look "new" on restart.
 print("Waiting for DB consistency...")
 time.sleep(3) 
 
 print("Stopping MagicFS daemon...")
 subprocess.run(["sudo", "pkill", "-x", "magicfs"])
 time.sleep(2)
+
+# CRITICAL FIX: FORCE UNMOUNT TO CLEAR ZOMBIE MOUNTPOINTS
+print("Ensuring mountpoint is clean...")
+subprocess.run(["sudo", "umount", "-l", test.mount_point], stderr=subprocess.DEVNULL)
+time.sleep(1)
 
 # Delete one more while dead to verify startup purge
 zombie_path = os.path.join(test.watch_dir, f"{SUBDIR}/file_{15}.txt")
