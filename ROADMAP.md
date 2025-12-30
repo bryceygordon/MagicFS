@@ -1,52 +1,36 @@
-================================================
-FILE: ROADMAP.md
-================================================
 # MagicFS Development Roadmap
 
-## 🎯 Vision: The Universal Context Layer
-
-MagicFS is not just a search tool; it is the "Context Layer" of the OS. Its goal is to allow users to manipulate files based on *meaning* rather than location, and to aggregate scattered "Data Islands" (Obsidian, GDrive, ~/Documents) into a single, unified interface.
-
-It operates on the philosophy that **"The Filesystem is the Interface."** Users configure the system using standard tools (`ln`, `mkdir`, `cp`) rather than config files or GUIs.
-
----
-
 ## 📜 History
-
-* **Phases 1-5 (Foundation)**: Basic FUSE loop, SQLite storage, FastEmbed integration.
-* **Phase 6 (Hardening)**: "Three-Organ" Architecture, Chunking, Binary Safety, 10MB limits.
-* **Phase 6.5 (Scalability)**: LRU Caching, Incremental Indexing, Zero-byte retry logic, Stress Testing.
+* **Phases 1-5**: Foundation.
+* **Phase 6**: Basic Hardening (10MB limits, Binary checks).
 
 ---
 
-## 🏗️ Era 2: Scalability & Content [ACTIVE]
+## 🏗️ Era 2: Scalability & Resilience [ACTIVE]
 
-### 🚧 Phase 7: The Universal Reader [ACTIVE]
-**Goal:** Break the "Format Barrier". Users store high-value knowledge in PDFs and DOCX, not just `.txt`. MagicFS must read them all.
+### 🚧 Phase 6.5: "The Conveyor Belt" (Concurrency & Flow Control) [DONE]
+**Goal:** Stop the system from choking on massive file dumps.
+* [x] **Dynamic Scaling:** Use `available_parallelism()` to set worker limits.
+* [x] **Priority Interlock:** Indexer (Writer) takes precedence over Searcher (Reader).
+* [x] **Lockout/Tagout:** Prevent race conditions on individual files.
 
-1.  **Rich Media Ingestion**: PDF and Office Document support.
-2.  **Contextual Visibility (`_CONTEXT.md`)**: Exposing *why* a file matched.
-
-### 🔮 Phase 8: Aggregation & Persistence [PLANNED]
-**Goal:** Transform from "Single Folder Watcher" to "System-Wide Aggregator".
-
-1.  **Multi-Root Support**: `/sources` directory for symlinking external paths.
-2.  **Saved Views**: Persistent queries via `/saved` directory.
-3.  **XDG Compliance**: Separate config (`~/.config`) from cache (`~/.cache`).
-
----
-
-## 🛡️ Era 3: Utility [PLANNED]
-
-### 🔮 Phase 9: The "Thin Client"
-**Goal:** A lightweight GUI that relies entirely on MagicFS for logic.
-* **Instant Search**: `ls /magic/search/...`
-* **Smart Sidebar**: Mapped to `/magic/saved/`
+### 🚧 Phase 6.9: "The Safety Circuits" (Stability) [NEXT UP]
+**Goal:** Prevent structural failures and user error loops.
+1.  **Anti-Feedback Loop:** Prevent recursive mounting.
+2.  **Thermal Overload:** "Cooling down" hot files (logs).
+3.  **Manual Sync:** "Push button" scanning for dumb drives.
 
 ---
 
-## 📏 Critical Constraints
+## 📚 Era 3: Content [PLANNED]
 
-1.  **The 10ms Law**: FUSE ops must never block >10ms.
-2.  **The 500MB Cap**: RAM usage must remain stable regardless of file count (Enforced via LRU).
-3.  **Zero Config**: Configuration via filesystem operations only.
+### 🔮 Phase 7: The Universal Reader
+**Goal:** PDF/DOCX support.
+* **Note:** We will not start this until `test_07` (The Real World) passes 100% consistently.
+
+---
+
+## 🧠 The "Thin Client" Vision
+**Goal:** An Evernote-killer that uses MagicFS as its backend.
+* **Design:** The client has no database. It just reads the file system.
+* **Manual Sync:** The client will use the `touch .magic/refresh` API to force updates.

@@ -1,67 +1,44 @@
-================================================
-FILE: TODO.md
-================================================
-## ✅ Completed Phases
-* [x] **Phases 1-5**: Foundation, FUSE Loop, Basic Search.
-
 # MagicFS Task List
 
-## 🔴 CRITICAL BLOCKER: The "Safe.txt" Race Condition
-**Context:** `test_07_real_world.py` Scenario 1 fails. We destroy a folder and rebuild it immediately. The DB ends up empty (missing `safe.txt`).
+## 🔴 CRITICAL BLOCKER: The "Safe.txt" Fault (Race Condition)
+**Context:** `test_07_real_world.py` Scenario 1 fails. After destroying a folder (`trap/`) and immediately rebuilding it, `safe.txt` is missing from the index.
 
-**The Diagnosis (The Electrician's View):**
-We suspect the "Stop" button (Delete Event) is being pressed *after* the "Start" button (Create Event) due to event queue ordering, cancelling out the valid file.
+**The Electrician's Diagnosis:**
+We have a "Stop" button (Delete Event) and a "Start" button (Create Event) being pressed simultaneously. The "Stop" relay seems to be dropping out *after* the "Start" relay latches, cutting power to the valid file.
 
-**Current Hardening (Already Implemented):**
-1.  **Librarian:** Debounce increased to 500ms.
-2.  **Oracle:** "Lockout" logic ensures `safe.txt` and `DELETE:safe.txt` cannot run in the same tick.
-3.  **Indexer:** "Arbitrator" check (`Path::exists`) prevents deleting a file if it currently exists on disk.
+**Current Safety Mechanisms (Installed):**
+1.  **The Interlock (Oracle):** Indexing (Forward) has priority over Searching (Reverse).
+2.  **The Lockout (Oracle):** We serialize operations. `safe.txt` and `DELETE:safe.txt` cannot run in the same tick.
+3.  **The Arbitrator (Indexer):** Before deleting, we check `Path::exists`. If the file is on disk, we *should* reject the Delete ticket.
 
 **⚠️ The Anomaly:**
-Despite these 3 safety mechanisms, `safe.txt` is *still* missing.
+Despite the Arbitrator, the file is still gone.
+* *Hypothesis A:* The Arbitrator check happens *too fast*. The file isn't created yet when we check `exists()`, so we proceed to delete.
+* *Hypothesis B:* The Librarian is sending the events in the wrong order (Delete *after* Create).
 
-**Next Steps (For Tomorrow):**
-1.  **Verify Disk State in Test:** Modify `test_07` failure message. Is `safe.txt` actually on disk? If yes, and not in DB, the Indexer failed to run. If no, the Indexer *deleted* it (Arbitrator failed).
-2.  **Debug The Lockout:** Is the Oracle correctly identifying `trap/safe.txt` and `DELETE:trap/safe.txt` as the same resource? (Check path string normalization/prefixes).
-3.  **Debug The Arbitrator:** Add logging to `Indexer::remove_file`. Is it actually hitting the `exists()` check? Is there a timing window where `exists()` returns false (during the split second of rebuilding) but the file is created 1ms later?
+**Next Steps (Immediate Actions):**
+* [ ] **Verify Reality:** Modify `test_07` to assert if `safe.txt` exists *on disk* when the failure occurs. (Did we fail to index, or did we actively delete it?)
+* [ ] **Debug the Arbitrator:** Add logging to `Indexer::remove_file`. Is it seeing the file?
+* [ ] **Refine the Sensor:** Ensure `wait_for_stable_db` isn't giving false positives on "Motor Stopped".
 
 ---
 
-## ✅ Phase 6.5: The Foundation (Stability & Scalability) [COMPLETED]
+## 🛡️ Phase 6.9: The Safety Systems (Infrastructure Hardening)
+**Goal:** Prevent self-destruction and infinite loops before adding new file formats.
 
-**Objective:** Scale to 10k files and 1 week uptime without crashing or freezing.
+* [ ] **The Anti-Feedback Switch (Main):**
+    * **Risk:** Mounting MagicFS *inside* the watched directory causes an infinite recursion loop (Microphone pointing at Speaker).
+    * **Fix:** Add startup check: `if watch_dir.starts_with(mount_point) { panic!("Feedback Loop Detected"); }`.
 
-### 6.5.1: Incremental Indexing (Stop the Storm)
-* [x] **DB Update**: Ensure `mtime` is accurately stored in `file_registry`.
-* [x] **Librarian Logic**:
-    * [x] Modify `scan_directory_for_files` to query the DB for the file's current `mtime`.
-    * [x] If `fs_mtime == db_mtime`, skip queuing.
-    * [x] Log skipped files as `DEBUG` only (reduce log noise).
-* [x] **Check**: Restarting the daemon on a watched folder should result in **0** embedding operations.
+* [ ] **Thermal Overload (Chatter Protection):**
+    * **Risk:** Log files updating 100x/minute burn out the Indexer.
+    * **Fix:** `HashMap` tracking file heat. If > 5 updates/min, lockout for 5 mins.
 
-### 6.5.2: State Consistency (Kill Zombies)
-* [x] **The Purge**:
-    * [x] Implement `Repository::get_all_files()`.
-    * [x] On startup, iterate all DB files. If `!Path::exists()`, delete from DB.
-* [x] **Retroactive Ignore**:
-    * [x] When `.magicfsignore` changes, trigger a scan.
-    * [x] If a file currently in DB matches a *new* ignore rule, delete it from DB.
+* [ ] **Manual Override (Forced Sync):**
+    * **Risk:** Network drives (NAS) don't send "Motion Sensor" events.
+    * **Fix:** Watch for `touch .magic/refresh` to trigger a full manual scan.
 
-### 6.5.3: Memory Hygiene (LRU)
-* [x] **InodeStore Refactor**:
-    * [x] Replace `DashMap` for `results` with `Mutex<LruCache>`.
-    * [x] Set capacity to ~50 active queries.
-* [x] **Oracle Cache**:
-    * [x] Use `LruCache` for `processed_queries` (Cap 1000).
-    * [x] Ensure we don't track infinite history.
-
-### 6.5.4: Stress Testing
-* [x] **Script**: Create `tests/cases/test_00_stress.py`.
-    * [x] Generate 50 files.
-    * [x] Measure time to index.
-    * [x] Restart daemon -> Verify 0 re-indexes.
-    * [x] **Cache Thrashing**: Send 100 unique queries to verify LRU eviction stability.
-
+---
 ---
 
 ## 🚀 Phase 7: The Universal Reader [ACTIVE]
