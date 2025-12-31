@@ -2,9 +2,9 @@
 
 ## 📜 History
 * **Phases 1-5**: Foundation (Basic Indexing, FUSE, Librarian).
-* **Phase 6**: Architecture Refactor & Hardening.
+* **Phase 6**: Architecture Refactor & Hardening [COMPLETE]
     * *Phase 6.5*: Concurrency & Flow Control.
-    * *Phase 6.9*: Lockout/Tagout, Race Condition Fixes, and Test Isolation.
+    * *Phase 6.9*: Safety Systems (Anti-Feedback, Thermal, Manual Refresh).
 
 ---
 
@@ -14,8 +14,8 @@
 **Goal:** Make the filesystem "Format Agnostic."
 * **Concept:** To the user, a PDF is just text. MagicFS must make it scriptable.
 * **Tasks:**
-    1.  Integrate `pdf-extract` for PDF parsing.
-    2.  Integrate `docx-rs` for Word documents.
+    1.  Integrate PDF parsing libraries.
+    2.  Integrate DOCX parsing libraries.
     3.  Refactor `text_extraction.rs` into a modular "Converter" system.
     4.  **Hardening:** Ensure corrupted PDFs do not crash the Indexer (Fail Small).
 

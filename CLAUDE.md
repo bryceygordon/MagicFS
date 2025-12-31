@@ -16,31 +16,33 @@ MagicFS uses a single-process architecture composed of strictly isolated service
 ```text
 ┌───────────────────────────── Process Boundary ──────────────────────────────┐
 │                                                                             │
-│  ┌───────────────┐       ┌─────────────────┐       ┌───────────────────────┐  │
+│  ┌───────────────┐        ┌─────────────────┐        ┌───────────────────────┐  │
 │  │ Hollow Drive  │◄────►│  Inode Store    │◄─────┤       Orchestrator      │  │
-│  │ (FUSE Interface)      │ (Shared State)  │       │       (Oracle.rs)       │  │
-│  └───────────────┘       └─────────────────┘       └───────────┬───────────┘  │
-│          ▲                                                       │             │
-│          │                                                ┌────────▼────────┐      │
-│        Syscalls                                           │      Engine     │      │
-│                                                           │ (Async Workers) │      │
-│                                                           └─┬─────────────┬─┘      │
-│                                                             │             │        │
-│                                                      ┌────▼────┐   ┌────▼────┐  │
-│                                                      │ Indexer │   │ Searcher│  │
-│                                                      └────┬────┘   └────┬────┘  │
-│                                                           │             │        │
-│                                                      ┌─────▼─────────────▼────┐  │
-│                                                      │        Repository        │  │
-│                                                      │    (SQLite + Vec)        │  │
-│                                                      └────────────────────────┘  │
-│                                                                             │
+│  │ (FUSE Interface)      │ (Shared State)  │        │       (Oracle.rs)       │  │
+│  └───────┬───────┘        └─────────────────┘        └───────────┬───────────┘  │
+│          │ Signal:                                               │              │
+│          │ .magic/refresh ──────────────────┐           ┌────────▼────────┐     │
+│          │                                  │           │      Engine     │     │
+│      Syscalls                               │           │ (Async Workers) │     │
+│                                             │           └─┬─────────────┬─┘     │
+│                                             │             │             │       │
+│                                    ┌────────▼────────┐    │Indexer      │Searcher│
+│                                    │    Librarian    │    │(Retry Logic)│       │
+│                                    │(Debounce/Watch) │    └────┬────────┴───┬───┘
+│                                    └────────┬────────┘         │            │    
+│                                             │                  │            │    
+│                                    ┌─────▼─────────────▼────────┴────────────┐  │
+│                                    │               Repository                │  │
+│                                    │           (SQLite + Vector)             │  │
+│                                    └─────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 1. Hollow Drive (`src/hollow_drive.rs`)
 * **Role**: The dumb FUSE terminal.
 * **Rule**: NEVER blocks. Checks `InodeStore`. If data is missing, returns `EAGAIN`.
+* **Features**:
+    * **Manual Refresh**: Intercepts `touch .magic/refresh` and sets the `refresh_signal` atomic flag.
 
 ### 2. Inode Store (`src/core/inode_store.rs`)
 * **Role**: The source of truth for "Virtual Files".
@@ -48,32 +50,32 @@ MagicFS uses a single-process architecture composed of strictly isolated service
 
 ### 3. The Orchestrator (`src/oracle.rs`)
 * **Role**: Event loop manager.
-* **Job**:
-    * Receives file events from `Librarian`.
-    * Dispatches tasks to `Indexer`.
-    * Checks `InodeStore` for pending searches -> Dispatches to `Searcher`.
+* **Safety Systems**:
+    * **Lockout/Tagout**: Prevents race conditions between Delete/Create tasks.
+    * **Arbitrator**: Verifies file existence before deletion to prevent "Ghost Deletes".
+    * **Prioritization**: Prioritizes Indexing over Searching.
 
 ### 4. The Engine (`src/engine/`)
-* **Indexer**: Handles file reading, **Format Conversion (PDF/DOCX)**, chunking text, generating embeddings, and DB writes.
+* **Indexer**: Handles file reading, chunking, and embeddings.
+    * **Retry Logic**: Retries on `PermissionDenied` to survive rapid file locking.
 * **Searcher**: Generates query embeddings, searches DB, updates `InodeStore`.
 
 ### 5. The Librarian (`src/librarian.rs`)
 * **Role**: The background watcher.
-* **Job**: Monitors physical directories for changes and queues them for the Orchestrator.
+* **Hardening**:
+    * **Thermal Protection**: Debounces rapid updates (2s window) with "Final Promise" logic to prevent starvation.
+    * **Manual Override**: Polls `refresh_signal` to trigger full scans for network/Docker volumes.
 
 ## 📂 Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Entry point. Initializes all services. |
-| `src/hollow_drive.rs` | FUSE implementation. |
+| `src/main.rs` | Entry point. Safety checks (Anti-Feedback Switch). |
+| `src/hollow_drive.rs` | FUSE implementation + Refresh Signal. |
 | `src/oracle.rs` | Async Orchestrator (Event Loop). |
-| `src/engine/indexer.rs` | Business Logic: File -> **Text (Rich Media)** -> Chunks -> DB. |
-| `src/engine/searcher.rs` | Business Logic: Query -> Embedding -> DB -> InodeStore. |
-| `src/core/inode_store.rs` | Shared state for VFS consistency. |
-| `src/storage/repository.rs` | Centralized SQL logic. |
-| `src/storage/text_extraction.rs` | **Universal Reader**: Handles PDF, DOCX, and Text parsing. |
-| `src/librarian.rs` | File watcher integration (notify crate). |
+| `src/librarian.rs` | Watcher, Debouncer, Refresh Logic. |
+| `src/engine/indexer.rs` | Business Logic: Extraction, Retry, Chunking. |
+| `src/storage/text_extraction.rs` | **Universal Reader**: 10MB limit, Binary detection. |
 
 ## 🔗 Version Control
 
@@ -96,16 +98,19 @@ cargo test
 **Test Suite Coverage**:
 | Test | Purpose |
 |------|---------|
+| `test_00_stress` | Startup Storm & Zombie Check |
 | `test_01_indexing` | Dynamic Indexing |
 | `test_02_dotfiles` | Ignore Rules |
 | `test_03_search` | End-to-End Search |
 | `test_04_hardening` | Binary/Large file rejection |
 | `test_05_chunking` | Sliding Window & Semantic Dilution |
-| `test_06_rich_media` | **(Active)** PDF/DOCX indexing |
+| `test_07_real_world` | Race Conditions & Permissions |
+| `test_09_chatter` | Thermal Protection (Debounce) |
+| `test_10_refresh` | Manual Override (`touch .magic/refresh`) |
 
 ## 📅 Roadmap Status
 
-* **Phase 1-5**: Foundation (Done)
-* **Phase 6**: Architecture Refactor & Hardening (Done)
+* **Phase 1-6**: Foundation & Hardening (Done)
+    * *Achievements*: Race condition fixes, Chatter suppression, Manual Refresh.
 * **Phase 7**: **The Universal Reader** (Active) - Support for PDF, DOCX extraction.
 * **Phase 8**: **Persistence** (Planned) - Saved Views (`mkdir` in `/saved/`) and Workflows.
