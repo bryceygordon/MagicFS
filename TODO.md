@@ -1,25 +1,5 @@
 # MagicFS Task List
 
-## 🔴 CRITICAL BLOCKER: The "Safe.txt" Fault (Race Condition)
-**Context:** `test_07_real_world.py` Scenario 1 fails. After destroying a folder (`trap/`) and immediately rebuilding it, `safe.txt` is missing from the index.
-
-**The Electrician's Diagnosis:**
-We have a "Stop" button (Delete Event) and a "Start" button (Create Event) being pressed simultaneously. The "Stop" relay seems to be dropping out *after* the "Start" relay latches, cutting power to the valid file.
-
-**Current Safety Mechanisms (Installed):**
-1.  **The Interlock (Oracle):** Indexing (Forward) has priority over Searching (Reverse).
-2.  **The Lockout (Oracle):** We serialize operations. `safe.txt` and `DELETE:safe.txt` cannot run in the same tick.
-3.  **The Arbitrator (Indexer):** Before deleting, we check `Path::exists`. If the file is on disk, we *should* reject the Delete ticket.
-
-**⚠️ The Anomaly:**
-Despite the Arbitrator, the file is still gone.
-* *Hypothesis A:* The Arbitrator check happens *too fast*. The file isn't created yet when we check `exists()`, so we proceed to delete.
-* *Hypothesis B:* The Librarian is sending the events in the wrong order (Delete *after* Create).
-
-**Next Steps (Immediate Actions):**
-* [ ] **Verify Reality:** Modify `test_07` to assert if `safe.txt` exists *on disk* when the failure occurs. (Did we fail to index, or did we actively delete it?)
-* [ ] **Debug the Arbitrator:** Add logging to `Indexer::remove_file`. Is it seeing the file?
-* [ ] **Refine the Sensor:** Ensure `wait_for_stable_db` isn't giving false positives on "Motor Stopped".
 
 ---
 
