@@ -20,19 +20,23 @@ impl Indexer {
         tracing::info!("[Indexer] Processing: {}", file_path);
         
         // 1. Extraction (with retries for file locks AND partial writes)
-        // Hardening: Handle Permission Denied gracefully inside this function
+        // Refactored: We now handle PermissionDenied INSIDE extract_with_retry
+        // so we don't drop the ball on locked files.
         let text_content = match Self::extract_with_retry(&file_path).await {
             Ok(t) => t,
-            Err(MagicError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
-                tracing::warn!("[Indexer] Permission denied: {}. Skipping.", file_path);
-                return Ok(());
-            },
             Err(e) => return Err(e),
         };
 
         if text_content.trim().is_empty() {
             // DIAGNOSTIC: Log why we are skipping
-            tracing::warn!("[Indexer] Skipping empty or binary file: {}", file_path);
+            // Check if it's actually 0 bytes on disk or just failed extraction
+            if let Ok(m) = std::fs::metadata(&file_path) {
+                if m.len() > 0 {
+                    tracing::warn!("[Indexer] Skipping NON-EMPTY file that produced 0 text (Binary?): {}", file_path);
+                } else {
+                    tracing::warn!("[Indexer] Skipping truly empty file: {}", file_path);
+                }
+            }
             return Ok(());
         }
 
@@ -115,7 +119,7 @@ impl Indexer {
     }
 
     async fn extract_with_retry(path: &str) -> Result<String> {
-        let max_retries = 10; // Increased retries
+        let max_retries = 20; // Hardening: Increased from 10 to 20 (2.0s total)
         let mut last_error = None;
 
         for attempt in 1..=max_retries {
@@ -125,16 +129,17 @@ impl Indexer {
             if let Ok(m) = std::fs::metadata(path) {
                 if m.len() == 0 { 
                     if attempt < max_retries {
-                        tracing::debug!("[Indexer] File {} is 0 bytes (attempt {}/{}), waiting for data...", path, attempt, max_retries);
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tracing::debug!("[Indexer] File {} is 0 bytes (attempt {}/{}), waiting...", path, attempt, max_retries);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     } else {
                         tracing::warn!("[Indexer] File {} is still 0 bytes after {} retries. Treating as empty.", path, max_retries);
                         return Ok(String::new());
                     }
                 }
-            } else if attempt == 1 {
-                // If we can't even get metadata on first attempt, might be permission denied immediately
+            } else {
+                // Metadata failed? Could be transient permission or deleted.
+                // We'll let the spawn_blocking call handle the error detail.
             }
 
             let result = tokio::task::spawn_blocking(move || {
@@ -143,26 +148,37 @@ impl Indexer {
 
             match result {
                 Ok(content) => {
-                    if !content.trim().is_empty() { 
-                        return Ok(content); 
-                    }
+                    // Success!
+                    return Ok(content);
                 },
                 Err(MagicError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
-                    // Fail fast on permission denied, do not retry
-                    return Err(MagicError::Io(e));
+                    // CRITICAL FIX: Retry on PermissionDenied
+                    if attempt < max_retries {
+                        tracing::warn!("[Indexer] Locked/PermissionDenied for {} (attempt {}/{}), waiting...", path, attempt, max_retries);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    } else {
+                        // Hard fail after retries
+                        return Err(MagicError::Io(e));
+                    }
                 }
                 Err(e) => {
+                    // Other errors (NotFound, etc)
                     last_error = Some(e);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
-            
-            // Backoff
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         
-        // If we failed after all retries, return empty string (soft fail) or error
-        tracing::warn!("[Indexer] Failed to extract text from {} after retries. Last error: {:?}", path, last_error);
-        Ok(String::new())
+        // If we failed after all retries
+        tracing::warn!("[Indexer] Failed to extract from {} after retries. Last error: {:?}", path, last_error);
+        
+        // If we have a specific error, return it. Otherwise empty string.
+        if let Some(e) = last_error {
+            Err(e)
+        } else {
+            Ok(String::new())
+        }
     }
 
     fn invalidate_cache(state: SharedState) -> Result<()> {
