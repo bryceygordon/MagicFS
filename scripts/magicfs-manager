@@ -1,0 +1,151 @@
+#!/bin/bash
+
+# ANSI Color Codes for UX
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configuration Paths
+CONFIG_DIR="$HOME/.config/magicfs"
+CONFIG_FILE="$CONFIG_DIR/daemon.conf"
+SERVICE_NAME="magicfs.service"
+
+# Helper: Print Banner
+print_banner() {
+    echo -e "${BLUE}"
+    echo "   __  __             _      ______ ____  "
+    echo "  |  \/  | __ _  __ _(_) ___|  ____/ ___| "
+    echo "  | |\/| |/ _\` |/ _\` | |/ __| |_   \___ \ "
+    echo "  | |  | | (_| | (_| | | (__|  _|   ___) |"
+    echo "  |_|  |_|\__,_|\__, |_|\___|_|    |____/ "
+    echo "                |___/                     "
+    echo -e "${NC}"
+}
+
+# Function: Setup
+setup() {
+    print_banner
+    echo -e "${GREEN}=== MagicFS Setup Wizard ===${NC}"
+    echo "This wizard will configure the persistent background service."
+    echo ""
+
+    # 1. Input: Mount Point
+    read -p "Where should MagicFS be mounted? [default: $HOME/MagicFS]: " MOUNT_INPUT
+    MOUNT_POINT="${MOUNT_INPUT:-$HOME/MagicFS}"
+    
+    # Expand tilde if present manually (bash read doesn't always expand)
+    MOUNT_POINT="${MOUNT_POINT/#\~/$HOME}"
+
+    # 2. Input: Watch Directory
+    read -p "Which directory should MagicFS monitor? [default: $HOME/Documents]: " WATCH_INPUT
+    WATCH_DIR="${WATCH_INPUT:-$HOME/Documents}"
+    WATCH_DIR="${WATCH_DIR/#\~/$HOME}"
+
+    # 3. Verify
+    echo -e "\n--------------------------------------------------"
+    echo -e "  Mount Point : ${BLUE}$MOUNT_POINT${NC}"
+    echo -e "  Watch Dir   : ${BLUE}$WATCH_DIR${NC}"
+    echo -e "--------------------------------------------------"
+    read -p "Is this configuration correct? [y/N]: " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        echo "Setup aborted."
+        exit 1
+    fi
+
+    # 4. Create Directories
+    echo -e "\n[1/4] Preparing directories..."
+    if [ ! -d "$MOUNT_POINT" ]; then
+        mkdir -p "$MOUNT_POINT"
+        echo "      Created mount point."
+    fi
+    
+    if [ ! -d "$CONFIG_DIR" ]; then
+        mkdir -p "$CONFIG_DIR"
+        echo "      Created config directory."
+    fi
+
+    # 5. Write Config
+    echo "[2/4] Saving configuration..."
+    echo "# MagicFS Daemon Configuration" > "$CONFIG_FILE"
+    echo "MAGICFS_MOUNT=\"$MOUNT_POINT\"" >> "$CONFIG_FILE"
+    echo "MAGICFS_WATCH=\"$WATCH_DIR\"" >> "$CONFIG_FILE"
+    echo "RUST_LOG=info" >> "$CONFIG_FILE"
+    echo "      Saved to $CONFIG_FILE"
+
+    # 6. Systemd Activation
+    echo "[3/4] Activating Systemd service..."
+    # Reload to pick up new unit file if changed
+    systemctl --user daemon-reload
+    # Enable to start on boot
+    systemctl --user enable "$SERVICE_NAME" > /dev/null 2>&1
+    # Restart to apply new config immediately
+    systemctl --user restart "$SERVICE_NAME"
+
+    # 7. Verification
+    echo "[4/4] Verifying status..."
+    sleep 2
+    if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+        echo -e "${GREEN}✓ MagicFS is RUNNING and PERSISTENT.${NC}"
+        echo "      To check logs: journalctl --user -u magicfs -f"
+        echo "      To browse:     ls $MOUNT_POINT"
+    else
+        echo -e "${RED}❌ Service failed to start.${NC}"
+        echo "      Checking logs:"
+        journalctl --user -u "$SERVICE_NAME" -n 10 --no-pager
+        exit 1
+    fi
+}
+
+# Function: Remove
+remove() {
+    echo -e "${RED}=== MagicFS Service Removal ===${NC}"
+    echo "This will stop the daemon and disable persistence."
+    read -p "Are you sure? [y/N]: " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        exit 1
+    fi
+
+    # 1. Stop Service
+    echo "[1/3] Stopping service..."
+    systemctl --user stop "$SERVICE_NAME"
+    systemctl --user disable "$SERVICE_NAME" > /dev/null 2>&1
+
+    # 2. Remove Config
+    echo "[2/3] Removing configuration..."
+    if [ -f "$CONFIG_FILE" ]; then
+        rm "$CONFIG_FILE"
+        echo "      Removed $CONFIG_FILE"
+    else
+        echo "      Config file not found (already clean)."
+    fi
+
+    # 3. Optional Data Cleanup
+    echo "[3/3] Data Cleanup..."
+    read -p "Do you want to delete the database index (~/.magicfs)? [y/N]: " DEL_DB
+    if [[ "$DEL_DB" == "y" || "$DEL_DB" == "Y" ]]; then
+        rm -rf "$HOME/.magicfs"
+        echo "      Removed database."
+    else
+        echo "      Database preserved."
+    fi
+
+    echo -e "${GREEN}✓ Service disabled.${NC}"
+    echo "To fully uninstall the software, run: sudo pacman -Rns magicfs-git"
+}
+
+# Entry Point
+case "$1" in
+    setup)
+        setup
+        ;;
+    remove)
+        remove
+        ;;
+    *)
+        echo "Usage: magicfs-manager {setup|remove}"
+        echo "  setup  : Configure and start the persistent daemon"
+        echo "  remove : Stop daemon and remove user config"
+        exit 1
+        ;;
+esac

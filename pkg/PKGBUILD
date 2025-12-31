@@ -1,0 +1,57 @@
+# Maintainer: Bryce Gordon <bryce@brycegordon.com>
+pkgname=magicfs-git
+pkgver=r1.0.0
+pkgrel=1
+pkgdesc="Semantic Virtual Filesystem - Turns Chaos into API"
+arch=('x86_64')
+url="https://github.com/bryceygordon-magicfs"
+license=('MIT')
+depends=('fuse3' 'gcc-libs')
+makedepends=('cargo' 'git' 'pkgconf')
+provides=('magicfs')
+conflicts=('magicfs')
+# This points to the parent directory of where PKGBUILD runs
+source=("git+file://${startdir}/..#branch=HEAD")
+md5sums=('SKIP')
+
+pkgver() {
+    # Move to the source directory extracted by makepkg
+    # Since we pointed to parent, the folder name will match the repo name
+    # We use a wildcard to find the folder makepkg created in src/
+    cd "$srcdir"/*magicfs* 2>/dev/null || cd "$srcdir"
+    
+    # Generate version based on git commits
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir"/*magicfs* 2>/dev/null || cd "$srcdir"
+    export RUSTUP_TOOLCHAIN=stable
+    # Fetch dependencies ahead of time
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$srcdir"/*magicfs* 2>/dev/null || cd "$srcdir"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    # Build release binary
+    cargo build --frozen --release --target "$CARCH-unknown-linux-gnu"
+}
+
+package() {
+    cd "$srcdir"/*magicfs* 2>/dev/null || cd "$srcdir"
+    
+    # 1. Install Main Binary
+    install -Dm755 "target/$CARCH-unknown-linux-gnu/release/magicfs" "$pkgdir/usr/bin/magicfs"
+    
+    # 2. Install The Manager Script
+    install -Dm755 "scripts/magicfs-manager" "$pkgdir/usr/bin/magicfs-manager"
+    
+    # 3. Install Systemd Service Template
+    # We place it in /usr/lib/systemd/user so it is available to all users on the system
+    install -Dm644 "systemd/magicfs.service" "$pkgdir/usr/lib/systemd/user/magicfs.service"
+    
+    # 4. Install Documentation
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

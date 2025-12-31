@@ -1,0 +1,28 @@
+[Unit]
+Description=MagicFS Semantic Filesystem Daemon
+Documentation=https://github.com/bryceygordon-magicfs
+After=network.target
+
+[Service]
+Type=simple
+# Load environment variables from the user config file
+# The '-' at the start means "ignore if file doesn't exist" (though our script ensures it does)
+EnvironmentFile=-%h/.config/magicfs/daemon.conf
+
+# Run the binary with arguments loaded from the config
+# We use standard shell variable syntax here
+ExecStart=/usr/bin/magicfs "${MAGICFS_MOUNT}" "${MAGICFS_WATCH}"
+
+# Resilience: Restart if it crashes, but wait 5s to avoid tight loops
+Restart=on-failure
+RestartSec=5s
+
+# Logging: Direct to journal (view with journalctl --user -u magicfs)
+StandardOutput=journal
+StandardError=journal
+
+# Security: Basic hardening for user services
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
