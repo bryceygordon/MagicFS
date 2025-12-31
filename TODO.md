@@ -6,7 +6,7 @@
 ## 🛡️ Phase 6.9: The Safety Systems (Infrastructure Hardening)
 **Goal:** Prevent self-destruction and infinite loops before adding new file formats.
 
-* [ ] **The Anti-Feedback Switch (Main):**
+* [x] **The Anti-Feedback Switch (Main):**
     * **Risk:** Mounting MagicFS *inside* the watched directory causes an infinite recursion loop (Microphone pointing at Speaker).
     * **Fix:** Add startup check: `if watch_dir.starts_with(mount_point) { panic!("Feedback Loop Detected"); }`.
 

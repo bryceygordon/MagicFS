@@ -19,6 +19,9 @@ DB_PATH="/tmp/.magicfs/index.db"
 BINARY="./target/debug/magicfs"
 LOG_FILE="tests/magicfs.log"
 
+# FIX: Add 'tests' directory to PYTHONPATH so cases can import 'common'
+export PYTHONPATH=$(pwd)/tests
+
 # Keep sudo alive
 sudo -v
 ( while true; do sudo -v; sleep 60; done; ) > /dev/null 2>&1 &
