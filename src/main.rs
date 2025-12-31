@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     tracing::info!("=");
 
     let mount_options = vec![
-        MountOption::AllowOther,
+        // MountOption::AllowOther,
         MountOption::AutoUnmount,
     ];
 
