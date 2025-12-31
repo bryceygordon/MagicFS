@@ -9,6 +9,16 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// === CONFIGURATION ===
+const DEBOUNCE_WINDOW_MS: u128 = 2000; // 2 Seconds
+const BATCH_SIZE_LIMIT: usize = 100;   // Starvation prevention
+
+// === INTERNAL TYPES ===
+struct DebounceState {
+    last_sent: Instant,
+    pending: bool,
+}
+
 struct IgnoreManager {
     rules: HashMap<PathBuf, HashSet<String>>,
 }
@@ -72,7 +82,6 @@ impl Librarian {
         let mut ignore_manager = IgnoreManager::new();
         for path_str in &paths_vec { ignore_manager.load_rules_for_root(Path::new(path_str)); }
 
-        // Initial Scan
         let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
         for path_str in &paths_vec {
             let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
@@ -82,48 +91,106 @@ impl Librarian {
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default()).unwrap();
         for path in &paths_vec { let _ = watcher.watch(Path::new(path), RecursiveMode::Recursive); }
 
-        // Hardening: Increased debounce to 500ms to allow FS operations (Delete/Create cycles) to settle
-        let debounce = Duration::from_millis(500);
+        let notify_debounce = Duration::from_millis(100);
+        let mut debounce_map: HashMap<String, DebounceState> = HashMap::new();
         let mut event_queue: HashMap<PathBuf, Event> = HashMap::new();
         let mut last_activity = Instant::now();
 
         loop {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ok(event)) => {
-                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
-                        for path in &event.paths { event_queue.insert(path.clone(), event.clone()); }
-                        last_activity = Instant::now();
+            // Check for new events
+            let received_event = match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(event)) => Some(event),
+                _ => None,
+            };
+
+            // 1. Ingest Event
+            if let Some(event) = received_event {
+                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+                    for path in &event.paths { event_queue.insert(path.clone(), event.clone()); }
+                    last_activity = Instant::now();
+                }
+            }
+
+            // 2. Decide: Process Queue?
+            // Process if: (Queue not empty) AND (Timeout passed OR Queue too big)
+            let should_process = !event_queue.is_empty() && 
+                (last_activity.elapsed() >= notify_debounce || event_queue.len() >= BATCH_SIZE_LIMIT);
+
+            if should_process {
+                let events = std::mem::take(&mut event_queue);
+                
+                // Refresh Ignore Rules (in case .magicfsignore changed)
+                for (path, _) in &events {
+                    if path.file_name().map_or(false, |n| n == ".magicfsignore") {
+                        for root_str in &paths_vec {
+                            ignore_manager.load_rules_for_root(Path::new(root_str));
+                        }
                     }
                 }
-                _ => {
-                    if !event_queue.is_empty() && last_activity.elapsed() >= debounce {
-                        let events = std::mem::take(&mut event_queue);
-                        
-                        // 1. Load Ignore Rules First
-                        for (path, _) in &events {
-                            if path.file_name().map_or(false, |n| n == ".magicfsignore") {
-                                for root_str in &paths_vec {
-                                    ignore_manager.load_rules_for_root(Path::new(root_str));
-                                }
-                            }
-                        }
 
-                        // 2. Process Events
-                        for (_path, event) in events { 
+                // Process Events
+                for (path_buf, event) in events { 
+                    let path_str = path_buf.to_string_lossy().to_string();
+                    
+                    // Thermal Debounce Logic
+                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+                        let should_emit = if let Some(debounce_state) = debounce_map.get_mut(&path_str) {
+                            if debounce_state.last_sent.elapsed().as_millis() < DEBOUNCE_WINDOW_MS {
+                                debounce_state.pending = true;
+                                false 
+                            } else {
+                                debounce_state.last_sent = Instant::now();
+                                debounce_state.pending = false;
+                                true
+                            }
+                        } else {
+                            debounce_map.insert(path_str.clone(), DebounceState { 
+                                last_sent: Instant::now(), 
+                                pending: false 
+                            });
+                            true
+                        };
+
+                        if should_emit {
                             let _ = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec);
+                        } else {
+                            tracing::debug!("[Librarian] Suppressing chatter for {}", path_str);
                         }
+                    } else {
+                        // Deletes always pass
+                        if matches!(event.kind, EventKind::Remove(_)) {
+                            debounce_map.remove(&path_str);
+                        }
+                        let _ = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec);
                     }
+                }
+            }
+
+            // 3. Check Final Promises (Heartbeat)
+            for (path_str, debounce_state) in debounce_map.iter_mut() {
+                if debounce_state.pending && debounce_state.last_sent.elapsed().as_millis() >= DEBOUNCE_WINDOW_MS {
+                    tracing::info!("[Librarian] Firing Final Promise for {}", path_str);
+                    let path = PathBuf::from(path_str);
+                    let synthetic_event = Event {
+                        kind: EventKind::Modify(notify::event::ModifyKind::Any),
+                        paths: vec![path],
+                        attrs: Default::default(),
+                    };
+                    let _ = Self::handle_file_event(&Ok(synthetic_event), &state, &ignore_manager, &paths_vec);
+                    
+                    debounce_state.last_sent = Instant::now();
+                    debounce_state.pending = false;
                 }
             }
         }
     }
 
+    // ... (rest of methods: purge_orphaned_records, scan_directory, handle_file_event remain same)
     fn purge_orphaned_records(state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         let state_guard = state.read().unwrap();
         let conn_lock = state_guard.db_connection.lock().unwrap();
         let conn = conn_lock.as_ref().unwrap();
         let repo = crate::storage::Repository::new(conn);
-
         let all_files = repo.get_all_files()?;
         for (id, path_str) in all_files {
             let path = Path::new(&path_str);
@@ -141,20 +208,10 @@ impl Librarian {
         let conn = conn_lock.as_ref().unwrap();
         let repo = crate::storage::Repository::new(conn);
         let files_to_index_arc = Arc::clone(&state_guard.files_to_index);
-
         let mut queue_batch = Vec::new();
-        
-        // Hardening: Explicitly handle Symlinks. 
         for entry in walkdir::WalkDir::new(dir_path)
-            .follow_links(false) // Safety switch
-            .into_iter()
-            .filter_entry(|e| {
-                if e.path_is_symlink() {
-                    return false; 
-                }
-                !ignore_manager.is_ignored(e.path(), watch_roots)
-            }) 
-        {
+            .follow_links(false).into_iter()
+            .filter_entry(|e| { if e.path_is_symlink() { return false; } !ignore_manager.is_ignored(e.path(), watch_roots) }) {
             if let Ok(entry) = entry {
                 let path = entry.path();
                 if path.is_file() {
@@ -170,9 +227,7 @@ impl Librarian {
             }
         }
         drop(conn_lock); drop(state_guard);
-        if !queue_batch.is_empty() {
-            files_to_index_arc.lock().unwrap().extend(queue_batch);
-        }
+        if !queue_batch.is_empty() { files_to_index_arc.lock().unwrap().extend(queue_batch); }
         Ok(())
     }
 
@@ -182,19 +237,12 @@ impl Librarian {
                 let guard = state.read().unwrap();
                 guard.files_to_index.clone()
             };
-            
-            // Hardening: Use explicit lock handling
             let mut queue = files_to_index.lock().unwrap_or_else(|e| e.into_inner());
-
             for path in &event.paths {
                 if ignore_manager.is_ignored(path, watch_roots) { continue; }
-                
-                // Hardening: Check if symlink before queuing
-                if path.is_symlink() {
-                    continue; 
-                }
-
+                if path.is_symlink() { continue; }
                 let path_str = path.to_string_lossy().to_string();
+                if queue.contains(&path_str) { continue; }
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => { 
                         if path.is_file() { 
@@ -203,8 +251,11 @@ impl Librarian {
                         } 
                     }
                     EventKind::Remove(_) => { 
-                        tracing::debug!("[Librarian] Queueing delete: {}", path_str);
-                        queue.push(format!("DELETE:{}", path_str)); 
+                        let del_cmd = format!("DELETE:{}", path_str);
+                        if !queue.contains(&del_cmd) {
+                            tracing::debug!("[Librarian] Queueing delete: {}", path_str);
+                            queue.push(del_cmd); 
+                        }
                     }
                     _ => {}
                 }
