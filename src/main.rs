@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
 
     let mount_options = vec![
         // MountOption::AllowOther,
-        MountOption::AutoUnmount,
+        // MountOption::AutoUnmount,
     ];
 
     match mount2(
