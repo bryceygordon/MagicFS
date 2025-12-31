@@ -61,3 +61,4 @@ pkg/src/
 pkg/pkg/
 *.pkg.tar.zst
 *.src.tar.gz
+pkg/magicfs/
