@@ -49,3 +49,9 @@
 * **Why:** Rapidly deleting and recreating a file (The "Reincarnation Race") often leaves the file locked or permissions flushing when the Indexer tries to read it.
 * **Bug:** Indexer treated `PermissionDenied` as "Skip this file forever," causing data loss because the Lockout system thought the job was done.
 * **Decision:** Treat `PermissionDenied` as a **Transient Error** (like 0-byte reads). Retry for up to 2 seconds before giving up.
+
+### 10. Thermal Protection (The Chatterbox Problem)
+* **Why:** A single file updating 50x/second (e.g., logs) can flood the event queue, starving legitimate indexing requests for other files.
+* **Decision:**
+    * **Debounce:** Ignore updates for a file if processed < 2s ago.
+    * **The Final Promise:** If we ignore an update, mark the file as "Pending". When the 2s timer expires, fire a synthetic event. This guarantees the *final* state is indexed even if 99 intermediate states were dropped.
