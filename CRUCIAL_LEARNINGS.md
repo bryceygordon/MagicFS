@@ -44,3 +44,8 @@
 ### 8. Test Suite Isolation (State Leakage)
 * **Why:** Running tests sequentially without restarting the daemon caused "Ghost Queries" from Test A to clog the queue during Test B.
 * **Decision:** The test runner must enforce a **Clean Slate Protocol**: Kill Daemon -> Force Unmount -> Wipe DB -> Start Daemon between *every* test case.
+
+### 9. The Permission Race (Retry on Lock)
+* **Why:** Rapidly deleting and recreating a file (The "Reincarnation Race") often leaves the file locked or permissions flushing when the Indexer tries to read it.
+* **Bug:** Indexer treated `PermissionDenied` as "Skip this file forever," causing data loss because the Lockout system thought the job was done.
+* **Decision:** Treat `PermissionDenied` as a **Transient Error** (like 0-byte reads). Retry for up to 2 seconds before giving up.
