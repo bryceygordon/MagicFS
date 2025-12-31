@@ -1,6 +1,5 @@
 # Rust build artifacts
 /target/
-Cargo.lock
 
 # IDE and editor files
 .vscode/
@@ -58,3 +57,7 @@ node_modules/
 /*.db-shm
 /*.db-wal.fastembed_cache/
 .fastembed_cache/
+pkg/src/
+pkg/pkg/
+*.pkg.tar.zst
+*.src.tar.gz

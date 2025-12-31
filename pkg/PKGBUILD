@@ -10,8 +10,10 @@ depends=('fuse3' 'gcc-libs')
 makedepends=('cargo' 'git' 'pkgconf')
 provides=('magicfs')
 conflicts=('magicfs')
-# This points to the parent directory of where PKGBUILD runs
-source=("git+file://${startdir}/..#branch=HEAD")
+# Get the canonical path to the project root (one level up)
+_project_root="$(cd "${startdir}/.." && pwd)"
+# Use the clean absolute path for the source
+source=("git+file://${_project_root}#branch=HEAD")
 md5sums=('SKIP')
 
 pkgver() {
