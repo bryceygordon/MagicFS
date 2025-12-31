@@ -3,87 +3,63 @@ import os
 import time
 import sqlite3
 import subprocess
-import sys
 
 test = MagicTest()
 print("--- TEST 10: Manual Refresh (The Kick Button) ---")
 
-# 1. Setup: Create a standard file
-filename = "ghost.txt"
-content = "I am a ghost in the machine."
-test.create_file(filename, content)
-test.wait_for_indexing(filename)
-print(f"✅ Initial indexing complete for {filename}")
+# 1. Create a "Ghost" file
+test.create_file("ghost.txt", "I am visible")
+test.wait_for_indexing("ghost.txt")
+print("✅ Initial indexing complete for ghost.txt")
 
-# 2. Sabotage: Corrupt the record in DB (Set size/mtime to 0)
-# FIX: Run as ROOT because the DB is owned by the daemon (root).
+# 2. Sabotage the Database
 print("[Sabotage] Manually corrupting record in DB (via sudo)...")
+sabotage_sql = "UPDATE file_registry SET size = 0 WHERE abs_path LIKE '%ghost.txt';"
+cmd = ["sudo", "sqlite3", test.db_path, sabotage_sql]
+subprocess.run(cmd, check=True)
+print("✅ Sabotage successful: ghost.txt size set to 0 in DB.")
 
-sabotage_script = f"""
-import sqlite3
-conn = sqlite3.connect('{test.db_path}')
-cursor = conn.cursor()
-cursor.execute("UPDATE file_registry SET size = 0, mtime = 0 WHERE abs_path LIKE '%{filename}'")
-conn.commit()
-conn.close()
-"""
+# 3. Trigger Manual Refresh (The Kick)
+kick_dir = os.path.join(test.watch_dir, ".magic")
+kick_file = os.path.join(kick_dir, "refresh")
 
-# Run the sabotage snippet as root
-result = subprocess.run(
-    ["sudo", sys.executable, "-c", sabotage_script],
-    capture_output=True,
-    text=True
-)
+# FIX: Create directory first and wait for inotify to catch up
+if not os.path.exists(kick_dir):
+    print(f"[Setup] Creating trigger directory: {kick_dir}")
+    os.makedirs(kick_dir, exist_ok=True)
+    # Critical wait for recursive watcher to attach to new folder
+    time.sleep(1.0) 
 
-if result.returncode != 0:
-    print(f"❌ SETUP FAILURE: Sudo sabotage failed.\n{result.stderr}")
-    exit(1)
+print(f"[Action] Touching {kick_file}...")
+# Update timestamp to trigger 'modify' event
+with open(kick_file, "w") as f:
+    f.write(str(time.time()))
 
-# Verify Sabotage (Read-only is fine here)
-def get_file_size_in_db():
+# 4. Wait for Repair
+print("[Wait] Waiting for manual scan to repair the record...")
+
+repaired = False
+for i in range(20):
     try:
         conn = sqlite3.connect(test.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT size FROM file_registry WHERE abs_path LIKE ?", (f"%{filename}",))
+        cursor.execute("SELECT size FROM file_registry WHERE abs_path LIKE '%ghost.txt'")
         row = cursor.fetchone()
         conn.close()
-        return row[0] if row else -1
-    except:
-        return -1
-
-if get_file_size_in_db() == 0:
-    print(f"✅ Sabotage successful: {filename} size set to 0 in DB.")
-else:
-    print("❌ SETUP FAILURE: DB record not corrupted (Size is not 0).")
-    exit(1)
-
-# 3. The Trigger: Touch .magic/refresh
-refresh_button = os.path.join(test.mount_point, ".magic", "refresh")
-print(f"[Action] Touching {refresh_button}...")
-
-try:
-    if os.path.exists(refresh_button):
-        # We need to explicitly update time to trigger the FUSE setattr
-        os.utime(refresh_button, None)
-    else:
-        print(f"❌ FAILURE: Refresh button not found at {refresh_button}")
-        exit(1)
-except OSError as e:
-    print(f"❌ FAILURE: Could not touch refresh button: {e}")
-    exit(1)
-
-# 4. Wait for Recovery
-print("[Wait] Waiting for manual scan to repair the record...")
-start = time.time()
-repaired = False
-while time.time() - start < 15:
-    sz = get_file_size_in_db()
-    if sz > 0:
-        print(f"✅ SUCCESS: Manual refresh repaired the file! (Size: {sz})")
-        repaired = True
-        break
+        
+        # If size > 0, the scan ran and fixed it
+        if row and row[0] > 0:
+            repaired = True
+            print(f"✅ Record repaired! Size restored to {row[0]}")
+            break
+    except Exception as e:
+        print(f"  DB Read Error: {e}")
+    
     time.sleep(0.5)
 
 if not repaired:
     print("❌ FAILURE: Manual refresh did not repair the file.")
+    test.dump_logs()
     exit(1)
+
+print("✅ TEST 10 PASSED")

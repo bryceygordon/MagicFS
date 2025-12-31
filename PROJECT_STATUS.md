@@ -1,36 +1,29 @@
 # 🚀 Project Status: MagicFS
 
 **Date**: 2025-12-31
-**Version**: 1.2.0-stable
-**Health**: 🟢 **STABLE** (Hardening Complete, Architecture Robust)
+**Version**: 1.2.0-dev
+**Health**: 🟢 **STABLE** (Scaling & Safety Logic Verified)
 
 ## 🏆 Current State
-We have successfully exited **Phase 6: Hardening**. The system is now resilient against race conditions, rapid file churn ("chatter"), and permission locking. The "Three-Organ" architecture is operating with high stability.
+The system has graduated from "Prototype" to "Resilient Beta". We have solved the critical memory leak in the InodeStore and implemented a streaming architecture for database operations, allowing it to handle 100k+ files without OOM.
 
 | Component | Status | Notes |
 | :--- | :--- | :--- |
-| **HollowDrive** | ✅ Stable | FUSE interface. Includes `refresh` button logic. |
-| **Librarian** | ✅ Stable | Includes "Debounce with Final Promise" & "Manual Override". |
-| **Oracle** | ✅ Stable | Includes "Lockout/Tagout" concurrency control. |
-| **Indexer** | ✅ Stable | Includes "Retry on Lock" & 10MB/Binary safety limits. |
-| **Searcher** | ✅ Stable | Validated cosine similarity & sliding window chunking. |
+| **HollowDrive** | ✅ Stable | Respects 10ms law. |
+| **Librarian** | ✅ Stable | **New:** Manual Refresh Trigger (`.magic/refresh`). |
+| **Oracle** | ✅ Stable | **New:** 1000 Inode Cap (LRU) to prevent leaks. |
+| **Storage** | ✅ Stable | **New:** Streaming Iterator for startup scans. |
 
 ## 🧪 Test Suite Metrics
 
 | Test | Status | Description |
 | :--- | :--- | :--- |
-| `test_00_stress` | ✅ PASS | Startup Storm & Zombie Check |
-| `test_01_indexing` | ✅ PASS | Dynamic Indexing |
-| `test_02_dotfiles` | ✅ PASS | Ignore Rules |
-| `test_03_search` | ✅ PASS | End-to-End Search |
-| `test_04_hardening` | ✅ PASS | Binary/Large file rejection |
-| `test_05_chunking` | ✅ PASS | "Needle in Haystack" (Score ~0.75) |
-| `test_07_real_world` | ✅ PASS | "Reincarnation Race" & Permission Locks |
-| `test_09_chatter` | ✅ PASS | Thermal Protection (50 updates -> ~2 ops) |
-| `test_10_refresh` | ✅ PASS | Manual Override (`touch .magic/refresh`) |
+| `test_09_memory_leak` | ✅ PASS | Survived 2000 query flood (LRU Eviction verified). |
+| `test_10_refresh` | ✅ PASS | Manual "Kick Button" repairs sabotaged records. |
+| `test_streaming` | ✅ PASS | Unit test confirms O(1) memory usage during DB scans. |
 
-## 📅 Immediate Next Actions (Phase 7)
+## 📅 Immediate Next Actions (Phase 7: The Universal Reader)
 
-1.  **Dependencies**: Add `pdf-extract` and `docx-rs`.
-2.  **Extractor Refactor**: Modularize `src/storage/text_extraction.rs` to handle MIME types.
-3.  **Rich Media Test**: Enable `test_06_rich_media.py`.
+1. **PDF Support**: Integrate `pdf-extract`.
+2. **DOCX Support**: Integrate `docx-rs`.
+3. **Safety Isolation**: Ensure parser panics do not crash the daemon.

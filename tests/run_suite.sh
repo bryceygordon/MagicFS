@@ -50,7 +50,14 @@ cleanup_environment() {
 echo "[Build] Compiling MagicFS..."
 cargo build --quiet || exit 1
 
-# 2. Run Test Suite
+# 2. Run Rust Unit Tests (NEW STEP)
+# This ensures internal logic (like Repository streaming) works 
+# before we try to mount the filesystem.
+echo "[Unit] Running Rust Unit Tests..."
+cargo test --lib --quiet || exit 1
+echo "✅ Unit Tests Passed"
+
+# 3. Run Test Suite
 echo "[Suite] Starting Isolation Runner..."
 
 # Sort tests to ensure deterministic order

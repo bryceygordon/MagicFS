@@ -8,38 +8,35 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-// NEW IMPORT
-use std::sync::atomic::Ordering;
-
-// === CONFIGURATION ===
-const DEBOUNCE_WINDOW_MS: u128 = 2000; // 2 Seconds
-const BATCH_SIZE_LIMIT: usize = 100;   // Starvation prevention
-
-// ... (Internal Types and IgnoreManager structs remain unchanged) ...
-struct DebounceState {
-    last_sent: Instant,
-    pending: bool,
-}
 
 struct IgnoreManager {
     rules: HashMap<PathBuf, HashSet<String>>,
 }
-// ... (IgnoreManager implementation remains unchanged) ...
+
 impl IgnoreManager {
     fn new() -> Self { Self { rules: HashMap::new() } }
+    
     fn load_rules_for_root(&mut self, root: &Path) {
         let ignore_file = root.join(".magicfsignore");
         let mut new_rules = HashSet::new();
+        
+        // DEFAULT IGNORES
         new_rules.insert(".magicfsignore".to_string());
         new_rules.insert(".magicfs".to_string());
+        new_rules.insert(".magic".to_string()); // Ignored to hide trigger files from SEARCH
+        new_rules.insert(".git".to_string());   // Standard noise
+        
         if let Ok(content) = fs::read_to_string(&ignore_file) {
             for line in content.lines() {
                 let rule = line.trim();
-                if !rule.is_empty() && !rule.starts_with('#') { new_rules.insert(rule.to_string()); }
+                if !rule.is_empty() && !rule.starts_with('#') { 
+                    new_rules.insert(rule.to_string()); 
+                }
             }
         }
         self.rules.insert(root.to_path_buf(), new_rules);
     }
+
     fn is_ignored(&self, abs_path: &Path, watch_roots: &[String]) -> bool {
         for root_str in watch_roots {
             let root = Path::new(root_str);
@@ -56,7 +53,6 @@ impl IgnoreManager {
     }
 }
 
-
 pub struct Librarian {
     pub state: SharedState,
     pub watch_paths: Arc<Mutex<Vec<String>>>,
@@ -64,7 +60,6 @@ pub struct Librarian {
 }
 
 impl Librarian {
-    // ... (new, start, add_watch_path remain unchanged) ...
     pub fn new(state: SharedState) -> Self {
         Self { state, watch_paths: Arc::new(Mutex::new(Vec::new())), thread_handle: None }
     }
@@ -86,6 +81,7 @@ impl Librarian {
         let mut ignore_manager = IgnoreManager::new();
         for path_str in &paths_vec { ignore_manager.load_rules_for_root(Path::new(path_str)); }
 
+        // Initial Scan
         let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
         for path_str in &paths_vec {
             let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
@@ -95,183 +91,164 @@ impl Librarian {
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default()).unwrap();
         for path in &paths_vec { let _ = watcher.watch(Path::new(path), RecursiveMode::Recursive); }
 
-        let notify_debounce = Duration::from_millis(100);
-        let mut debounce_map: HashMap<String, DebounceState> = HashMap::new();
+        // Hardening: Increased debounce to 500ms
+        let debounce = Duration::from_millis(500);
         let mut event_queue: HashMap<PathBuf, Event> = HashMap::new();
         let mut last_activity = Instant::now();
 
         loop {
-            // NEW: CHECK MANUAL OVERRIDE (High Priority)
-            {
-                // We scope this so we don't hold the read lock on state too long
-                let should_refresh = {
-                    if let Ok(state_guard) = state.read() {
-                        state_guard.refresh_signal.load(Ordering::Relaxed)
-                    } else {
-                        false
-                    }
-                };
-
-                if should_refresh {
-                    tracing::info!("[Librarian] executing MANUAL FULL SCAN");
-                    // Reset flag
-                    if let Ok(state_guard) = state.read() {
-                        state_guard.refresh_signal.store(false, Ordering::Relaxed);
-                    }
-                    
-                    // Re-run scan logic
-                    // 1. Refresh ignore rules
-                    for path_str in &paths_vec { ignore_manager.load_rules_for_root(Path::new(path_str)); }
-                    // 2. Purge orphans
-                    let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
-                    // 3. Scan
-                    for path_str in &paths_vec {
-                        let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(event)) => {
+                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+                        for path in &event.paths { event_queue.insert(path.clone(), event.clone()); }
+                        last_activity = Instant::now();
                     }
                 }
-            }
-
-            // ... (Rest of loop remains unchanged) ...
-            // Check for new events
-            let received_event = match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ok(event)) => Some(event),
-                _ => None,
-            };
-
-            // 1. Ingest Event
-            if let Some(event) = received_event {
-                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
-                    for path in &event.paths { event_queue.insert(path.clone(), event.clone()); }
-                    last_activity = Instant::now();
-                }
-            }
-
-            // 2. Decide: Process Queue?
-            let should_process = !event_queue.is_empty() && 
-                (last_activity.elapsed() >= notify_debounce || event_queue.len() >= BATCH_SIZE_LIMIT);
-
-            if should_process {
-                let events = std::mem::take(&mut event_queue);
-                
-                for (path, _) in &events {
-                    if path.file_name().map_or(false, |n| n == ".magicfsignore") {
-                        for root_str in &paths_vec {
-                            ignore_manager.load_rules_for_root(Path::new(root_str));
-                        }
-                    }
-                }
-
-                for (path_buf, event) in events { 
-                    let path_str = path_buf.to_string_lossy().to_string();
-                    
-                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-                        let should_emit = if let Some(debounce_state) = debounce_map.get_mut(&path_str) {
-                            if debounce_state.last_sent.elapsed().as_millis() < DEBOUNCE_WINDOW_MS {
-                                debounce_state.pending = true;
-                                false 
-                            } else {
-                                debounce_state.last_sent = Instant::now();
-                                debounce_state.pending = false;
-                                true
+                _ => {
+                    if !event_queue.is_empty() && last_activity.elapsed() >= debounce {
+                        let events = std::mem::take(&mut event_queue);
+                        
+                        // 1. Reload Ignore Rules
+                        for (path, _) in &events {
+                            if path.file_name().map_or(false, |n| n == ".magicfsignore") {
+                                for root_str in &paths_vec {
+                                    ignore_manager.load_rules_for_root(Path::new(root_str));
+                                }
                             }
-                        } else {
-                            debounce_map.insert(path_str.clone(), DebounceState { 
-                                last_sent: Instant::now(), 
-                                pending: false 
-                            });
-                            true
-                        };
+                        }
 
-                        if should_emit {
+                        // 2. Process Events
+                        for (_path, event) in events { 
                             let _ = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec);
-                        } else {
-                            tracing::debug!("[Librarian] Suppressing chatter for {}", path_str);
                         }
-                    } else {
-                        if matches!(event.kind, EventKind::Remove(_)) {
-                            debounce_map.remove(&path_str);
-                        }
-                        let _ = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec);
                     }
-                }
-            }
-
-            // 3. Check Final Promises
-            for (path_str, debounce_state) in debounce_map.iter_mut() {
-                if debounce_state.pending && debounce_state.last_sent.elapsed().as_millis() >= DEBOUNCE_WINDOW_MS {
-                    tracing::info!("[Librarian] Firing Final Promise for {}", path_str);
-                    let path = PathBuf::from(path_str);
-                    let synthetic_event = Event {
-                        kind: EventKind::Modify(notify::event::ModifyKind::Any),
-                        paths: vec![path],
-                        attrs: Default::default(),
-                    };
-                    let _ = Self::handle_file_event(&Ok(synthetic_event), &state, &ignore_manager, &paths_vec);
-                    debounce_state.last_sent = Instant::now();
-                    debounce_state.pending = false;
                 }
             }
         }
     }
 
-    // ... (Existing helper methods) ...
     fn purge_orphaned_records(state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         let state_guard = state.read().unwrap();
         let conn_lock = state_guard.db_connection.lock().unwrap();
         let conn = conn_lock.as_ref().unwrap();
         let repo = crate::storage::Repository::new(conn);
-        let all_files = repo.get_all_files()?;
-        for (id, path_str) in all_files {
+
+        let mut deletion_queue: Vec<u64> = Vec::new();
+        const BATCH_SIZE: usize = 1000;
+
+        tracing::info!("[Librarian] Starting orphan scan (Streaming Mode)...");
+
+        repo.scan_all_files(|id, path_str| {
             let path = Path::new(&path_str);
-            if !path.exists() || ignore_manager.is_ignored(path, watch_roots) {
-                let _ = repo.delete_file_by_id(id);
+            let should_delete = !path.exists() || ignore_manager.is_ignored(path, watch_roots);
+            
+            if should_delete {
+                deletion_queue.push(id);
             }
+
+            if deletion_queue.len() >= BATCH_SIZE {
+                for orphan_id in &deletion_queue {
+                    let _ = repo.delete_file_by_id(*orphan_id);
+                }
+                deletion_queue.clear();
+            }
+            Ok(())
+        })?;
+
+        for orphan_id in &deletion_queue {
+            let _ = repo.delete_file_by_id(*orphan_id);
         }
+
+        tracing::info!("[Librarian] Orphan scan complete.");
         Ok(())
     }
 
     fn scan_directory_for_files(state: &SharedState, dir_path: &Path, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         if !dir_path.exists() { return Ok(()); }
-        let state_guard = state.read().unwrap();
-        let conn_lock = state_guard.db_connection.lock().unwrap();
-        let conn = conn_lock.as_ref().unwrap();
-        let repo = crate::storage::Repository::new(conn);
-        let files_to_index_arc = Arc::clone(&state_guard.files_to_index);
+        
+        let files_to_index_arc = {
+            let state_guard = state.read().unwrap();
+            state_guard.files_to_index.clone()
+        };
+
         let mut queue_batch = Vec::new();
+        
         for entry in walkdir::WalkDir::new(dir_path)
-            .follow_links(false).into_iter()
-            .filter_entry(|e| { if e.path_is_symlink() { return false; } !ignore_manager.is_ignored(e.path(), watch_roots) }) {
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.path_is_symlink() { return false; }
+                !ignore_manager.is_ignored(e.path(), watch_roots)
+            }) 
+        {
             if let Ok(entry) = entry {
                 let path = entry.path();
                 if path.is_file() {
                     let path_str = path.to_string_lossy().to_string();
                     let fs_mtime = path.metadata().ok().and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                    let should_index = match repo.get_file_metadata(&path_str) {
-                        Ok(Some((db_mtime, _))) => fs_mtime > db_mtime,
-                        _ => true,
+                    let fs_size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
+                    
+                    // PERFORMANCE FIX: Lock DB only for the specific check, not the whole walk
+                    let should_index = {
+                        let state_guard = state.read().unwrap();
+                        let conn_lock = state_guard.db_connection.lock().unwrap();
+                        let conn = conn_lock.as_ref().unwrap();
+                        let repo = crate::storage::Repository::new(conn);
+                        
+                        match repo.get_file_metadata(&path_str) {
+                            Ok(Some((db_mtime, db_size))) => (fs_mtime > db_mtime) || (fs_size != db_size),
+                            _ => true,
+                        }
                     };
+                    
                     if should_index { queue_batch.push(path_str); }
                 }
             }
         }
-        drop(conn_lock); drop(state_guard);
-        if !queue_batch.is_empty() { files_to_index_arc.lock().unwrap().extend(queue_batch); }
+        
+        if !queue_batch.is_empty() {
+            files_to_index_arc.lock().unwrap().extend(queue_batch);
+        }
         Ok(())
     }
 
     fn handle_file_event(event: &std::result::Result<Event, notify::Error>, state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         if let Ok(event) = event {
+            
+            // --------------------------------------------------------
+            // 🆕 MANUAL REFRESH TRIGGER (Robust & BEFORE Ignore Check)
+            // --------------------------------------------------------
+            for path in &event.paths {
+                // Check if filename is 'refresh' and parent is '.magic'
+                if let Some(file_name) = path.file_name() {
+                    if file_name == "refresh" {
+                        if let Some(parent) = path.parent() {
+                             if parent.file_name().map_or(false, |n| n == ".magic") {
+                                tracing::info!("[Librarian] 🔄 Manual Refresh Triggered via {:?}", path);
+                                for root in watch_roots {
+                                    tracing::info!("[Librarian] Rescanning root: {}", root);
+                                    let _ = Self::scan_directory_for_files(state, Path::new(root), ignore_manager, watch_roots);
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+
             let files_to_index = {
                 let guard = state.read().unwrap();
                 guard.files_to_index.clone()
             };
+            
             let mut queue = files_to_index.lock().unwrap_or_else(|e| e.into_inner());
+
             for path in &event.paths {
                 if ignore_manager.is_ignored(path, watch_roots) { continue; }
                 if path.is_symlink() { continue; }
+
                 let path_str = path.to_string_lossy().to_string();
-                if queue.contains(&path_str) { continue; }
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => { 
                         if path.is_file() { 
@@ -280,11 +257,8 @@ impl Librarian {
                         } 
                     }
                     EventKind::Remove(_) => { 
-                        let del_cmd = format!("DELETE:{}", path_str);
-                        if !queue.contains(&del_cmd) {
-                            tracing::debug!("[Librarian] Queueing delete: {}", path_str);
-                            queue.push(del_cmd); 
-                        }
+                        tracing::debug!("[Librarian] Queueing delete: {}", path_str);
+                        queue.push(format!("DELETE:{}", path_str)); 
                     }
                     _ => {}
                 }

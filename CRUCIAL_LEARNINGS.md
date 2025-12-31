@@ -55,3 +55,16 @@
 * **Decision:**
     * **Debounce:** Ignore updates for a file if processed < 2s ago.
     * **The Final Promise:** If we ignore an update, mark the file as "Pending". When the 2s timer expires, fire a synthetic event. This guarantees the *final* state is indexed even if 99 intermediate states were dropped.
+
+### 9. The "Ignore Paradox" (Event Ordering)
+* **Why:** We added `.magic` to the Ignore List to hide internal files from search results. However, the "Kick Button" (`.magic/refresh`) is *inside* that ignored directory.
+* **Failure:** The Librarian ignored the refresh event because it checked "Is Ignored?" before "Is Trigger?".
+* **Decision:** **Trigger Checks MUST happen before Ignore Checks.** High-priority control signals override passive ignore rules.
+
+### 10. The Watcher Race (Test Harness)
+* **Why:** In tests, creating a directory and immediately creating a file inside it causes a race condition. The OS watcher takes a non-zero amount of time to attach to the new directory.
+* **Decision:** When testing file events in new directories, **Create Dir -> Wait (1s) -> Create File**.
+
+### 11. The "Blind Update" (Metadata Sync)
+* **Why:** We tried to fix a corrupted file record by checking `mtime`. But changing a file's content doesn't always change `mtime` (e.g. rapid edits or metadata sabotage).
+* **Decision:** The "Should Index?" check now verifies **BOTH** `mtime` and `size`. If either disagrees with the DB, we re-index.
