@@ -1,7 +1,7 @@
 // FILE: src/state.rs
 
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, AtomicBool}; // Added AtomicBool
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -33,8 +33,11 @@ pub struct GlobalState {
     pub files_to_index: Arc<std::sync::Mutex<Vec<String>>>,
 
     /// Version counter for the index/cache state.
-    /// Incremented whenever the index changes and caches are invalidated.
     pub index_version: Arc<AtomicUsize>,
+    
+    /// NEW: Manual Override Signal (Atomic Flag)
+    /// Set to true by HollowDrive, read/reset by Librarian
+    pub refresh_signal: Arc<AtomicBool>,
 }
 
 /// Result of a semantic search operation
@@ -57,6 +60,7 @@ impl Default for GlobalState {
             embedding_tx: Arc::new(RwLock::new(None)),
             files_to_index: Arc::new(std::sync::Mutex::new(Vec::new())),
             index_version: Arc::new(AtomicUsize::new(0)),
+            refresh_signal: Arc::new(AtomicBool::new(false)),
         }
     }
 }

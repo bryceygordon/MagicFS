@@ -94,6 +94,14 @@ impl Filesystem for HollowDrive {
                 reply.entry(&ttl, &attr, 0);
                 return;
             }
+            // NEW: The Refresh Button (ino=4)
+            if name_str == "refresh" {
+                let mut attr = mk_attr(4, fuser::FileType::RegularFile);
+                attr.size = 0;
+                attr.perm = 0o666; // Writable so 'touch' works
+                reply.entry(&ttl, &attr, 0);
+                return;
+            }
             reply.error(libc::ENOENT);
             return;
         }
@@ -133,7 +141,7 @@ impl Filesystem for HollowDrive {
 
         // Handle dynamic search result directories (parent is a search inode)
         // Check if parent is a dynamic search inode
-        if parent > 3 {
+        if parent > 4 {
             let state_guard = self.state.read().unwrap();
             let inode_store = &state_guard.inode_store;
 
@@ -159,13 +167,15 @@ impl Filesystem for HollowDrive {
         let ttl = std::time::Duration::from_secs(1);
 
         // Determine file type and attributes based on inode number
-        let (kind, size, nlink) = match ino {
+        let (kind, size, nlink, perm) = match ino {
             // Root directory
-            1 => (fuser::FileType::Directory, 4096, 3),
+            1 => (fuser::FileType::Directory, 4096, 3, 0o755),
             // .magic directory
-            2 => (fuser::FileType::Directory, 4096, 2),
+            2 => (fuser::FileType::Directory, 4096, 2, 0o755),
             // search directory
-            3 => (fuser::FileType::Directory, 4096, 2),
+            3 => (fuser::FileType::Directory, 4096, 2, 0o755),
+            // Refresh file
+            4 => (fuser::FileType::RegularFile, 0, 1, 0o666),
             // Search result directories (dynamic inodes)
             _ => {
                 let state_guard = self.state.read().map_err(|_| {
@@ -175,9 +185,9 @@ impl Filesystem for HollowDrive {
 
                 // USE INODE STORE
                 if state_guard.inode_store.get_query(ino).is_some() {
-                    (fuser::FileType::Directory, 4096, 2)
+                    (fuser::FileType::Directory, 4096, 2, 0o755)
                 } else {
-                    (fuser::FileType::RegularFile, 1024, 1)
+                    (fuser::FileType::RegularFile, 1024, 1, 0o644)
                 }
             }
         };
@@ -191,7 +201,7 @@ impl Filesystem for HollowDrive {
             ctime: SystemTime::now(),
             crtime: SystemTime::now(),
             kind,
-            perm: 0o644,
+            perm,
             nlink,
             uid: 1000,
             gid: 1000,
@@ -201,6 +211,57 @@ impl Filesystem for HollowDrive {
         };
 
         reply.attr(&ttl, &attr);
+    }
+
+    // NEW: Implement setattr to handle 'touch' on the refresh file
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<std::time::SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<std::time::SystemTime>,
+        _chgtime: Option<std::time::SystemTime>,
+        _bkuptime: Option<std::time::SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr
+    ) {
+        if ino == 4 {
+            tracing::info!("[HollowDrive] Manual Refresh Requested via 'touch'");
+            
+            // Trigger the signal
+            let state_guard = self.state.read().unwrap();
+            state_guard.refresh_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+            
+            // Fake success return
+            let ttl = std::time::Duration::from_secs(1);
+            let attr = fuser::FileAttr {
+                ino: 4,
+                size: 0,
+                blocks: 0,
+                atime: std::time::SystemTime::now(),
+                mtime: std::time::SystemTime::now(),
+                ctime: std::time::SystemTime::now(),
+                crtime: std::time::SystemTime::now(),
+                kind: fuser::FileType::RegularFile,
+                perm: 0o666, 
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                rdev: 0,
+                blksize: 4096,
+                flags: 0,
+            };
+            reply.attr(&ttl, &attr);
+            return;
+        }
+        reply.error(libc::EACCES);
     }
 
     fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
@@ -233,7 +294,10 @@ impl Filesystem for HollowDrive {
 
         // .magic directory
         if ino == 2 {
-            let all_entries = entries;
+            let mut all_entries = entries;
+            // NEW: Add refresh button
+            all_entries.push((4, FileType::RegularFile, "refresh".to_string()));
+
             for (i, (ino, file_type, name)) in all_entries.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i + 1) as i64, *file_type, name) {
                     break;
@@ -333,8 +397,14 @@ impl Filesystem for HollowDrive {
         tracing::debug!("[HollowDrive] open: ino={}", ino);
 
         // For search result files, just check if they exist
-        if ino > 3 {
+        if ino > 4 {
             // Search result files are always readable
+            reply.opened(0, 0);
+            return;
+        }
+
+        // Allow opening the refresh button (for write?)
+        if ino == 4 {
             reply.opened(0, 0);
             return;
         }
@@ -345,8 +415,8 @@ impl Filesystem for HollowDrive {
     fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
         tracing::debug!("[HollowDrive] read: ino={}, offset={}, size={}", ino, offset, size);
 
-        // For search result files (ino > 3), return file content
-        if ino > 3 {
+        // For search result files (ino > 4), return file content
+        if ino > 4 {
             let state_guard = self.state.read().map_err(|_| {
                 tracing::error!("[HollowDrive] Failed to acquire read lock for read");
                 libc::EIO

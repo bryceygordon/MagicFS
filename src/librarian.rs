@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+// NEW IMPORT
+use std::sync::atomic::Ordering;
 
 // === CONFIGURATION ===
 const DEBOUNCE_WINDOW_MS: u128 = 2000; // 2 Seconds
 const BATCH_SIZE_LIMIT: usize = 100;   // Starvation prevention
 
-// === INTERNAL TYPES ===
+// ... (Internal Types and IgnoreManager structs remain unchanged) ...
 struct DebounceState {
     last_sent: Instant,
     pending: bool,
@@ -22,7 +24,7 @@ struct DebounceState {
 struct IgnoreManager {
     rules: HashMap<PathBuf, HashSet<String>>,
 }
-
+// ... (IgnoreManager implementation remains unchanged) ...
 impl IgnoreManager {
     fn new() -> Self { Self { rules: HashMap::new() } }
     fn load_rules_for_root(&mut self, root: &Path) {
@@ -54,6 +56,7 @@ impl IgnoreManager {
     }
 }
 
+
 pub struct Librarian {
     pub state: SharedState,
     pub watch_paths: Arc<Mutex<Vec<String>>>,
@@ -61,6 +64,7 @@ pub struct Librarian {
 }
 
 impl Librarian {
+    // ... (new, start, add_watch_path remain unchanged) ...
     pub fn new(state: SharedState) -> Self {
         Self { state, watch_paths: Arc::new(Mutex::new(Vec::new())), thread_handle: None }
     }
@@ -97,6 +101,37 @@ impl Librarian {
         let mut last_activity = Instant::now();
 
         loop {
+            // NEW: CHECK MANUAL OVERRIDE (High Priority)
+            {
+                // We scope this so we don't hold the read lock on state too long
+                let should_refresh = {
+                    if let Ok(state_guard) = state.read() {
+                        state_guard.refresh_signal.load(Ordering::Relaxed)
+                    } else {
+                        false
+                    }
+                };
+
+                if should_refresh {
+                    tracing::info!("[Librarian] executing MANUAL FULL SCAN");
+                    // Reset flag
+                    if let Ok(state_guard) = state.read() {
+                        state_guard.refresh_signal.store(false, Ordering::Relaxed);
+                    }
+                    
+                    // Re-run scan logic
+                    // 1. Refresh ignore rules
+                    for path_str in &paths_vec { ignore_manager.load_rules_for_root(Path::new(path_str)); }
+                    // 2. Purge orphans
+                    let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
+                    // 3. Scan
+                    for path_str in &paths_vec {
+                        let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
+                    }
+                }
+            }
+
+            // ... (Rest of loop remains unchanged) ...
             // Check for new events
             let received_event = match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ok(event)) => Some(event),
@@ -112,14 +147,12 @@ impl Librarian {
             }
 
             // 2. Decide: Process Queue?
-            // Process if: (Queue not empty) AND (Timeout passed OR Queue too big)
             let should_process = !event_queue.is_empty() && 
                 (last_activity.elapsed() >= notify_debounce || event_queue.len() >= BATCH_SIZE_LIMIT);
 
             if should_process {
                 let events = std::mem::take(&mut event_queue);
                 
-                // Refresh Ignore Rules (in case .magicfsignore changed)
                 for (path, _) in &events {
                     if path.file_name().map_or(false, |n| n == ".magicfsignore") {
                         for root_str in &paths_vec {
@@ -128,11 +161,9 @@ impl Librarian {
                     }
                 }
 
-                // Process Events
                 for (path_buf, event) in events { 
                     let path_str = path_buf.to_string_lossy().to_string();
                     
-                    // Thermal Debounce Logic
                     if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
                         let should_emit = if let Some(debounce_state) = debounce_map.get_mut(&path_str) {
                             if debounce_state.last_sent.elapsed().as_millis() < DEBOUNCE_WINDOW_MS {
@@ -157,7 +188,6 @@ impl Librarian {
                             tracing::debug!("[Librarian] Suppressing chatter for {}", path_str);
                         }
                     } else {
-                        // Deletes always pass
                         if matches!(event.kind, EventKind::Remove(_)) {
                             debounce_map.remove(&path_str);
                         }
@@ -166,7 +196,7 @@ impl Librarian {
                 }
             }
 
-            // 3. Check Final Promises (Heartbeat)
+            // 3. Check Final Promises
             for (path_str, debounce_state) in debounce_map.iter_mut() {
                 if debounce_state.pending && debounce_state.last_sent.elapsed().as_millis() >= DEBOUNCE_WINDOW_MS {
                     tracing::info!("[Librarian] Firing Final Promise for {}", path_str);
@@ -177,7 +207,6 @@ impl Librarian {
                         attrs: Default::default(),
                     };
                     let _ = Self::handle_file_event(&Ok(synthetic_event), &state, &ignore_manager, &paths_vec);
-                    
                     debounce_state.last_sent = Instant::now();
                     debounce_state.pending = false;
                 }
@@ -185,7 +214,7 @@ impl Librarian {
         }
     }
 
-    // ... (rest of methods: purge_orphaned_records, scan_directory, handle_file_event remain same)
+    // ... (Existing helper methods) ...
     fn purge_orphaned_records(state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         let state_guard = state.read().unwrap();
         let conn_lock = state_guard.db_connection.lock().unwrap();
