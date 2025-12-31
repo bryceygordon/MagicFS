@@ -1,6 +1,6 @@
 # Maintainer: Bryce Gordon <bryce@brycegordon.com>
 pkgname=magicfs-git
-pkgver=r1.0.0
+pkgver=r81.33ac6b7
 pkgrel=1
 pkgdesc="Semantic Virtual Filesystem - Turns Chaos into API"
 arch=('x86_64')
