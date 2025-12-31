@@ -28,7 +28,8 @@ use std::collections::HashSet;
 
 // Hardening: Concurrency Limits
 const MAX_CONCURRENT_INDEXERS: usize = 2;
-const MAX_CONCURRENT_SEARCHERS: usize = 8;
+// REVISED: Reduced from 8 to 2 to prevent SQLite starvation/locking during heavy load.
+const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
 pub struct Oracle {
     pub state: SharedState,
@@ -150,7 +151,9 @@ impl Oracle {
             // 2. THE RADIO CHECK (Update The Ledger)
             // Drain all "Job Complete" messages from the workers
             while let Ok(finished_path) = completion_rx.try_recv() {
-                // tracing::debug!("[Oracle] Worker finished: {}", finished_path);
+                if finished_path.contains("safe.txt") {
+                    tracing::info!("[Oracle] Radio received: Worker finished '{}'. Removing lock.", finished_path);
+                }
                 active_jobs.remove(&finished_path);
             }
 
@@ -183,12 +186,18 @@ impl Oracle {
                 
                 // CHECK THE BOARD: Is this file already being worked on?
                 if active_jobs.contains(&canonical_path) || tick_locked_files.contains(&canonical_path) {
+                    if canonical_path.contains("safe.txt") {
+                        tracing::info!("[Oracle] Lockout active for '{}'. Re-queueing ticket.", canonical_path);
+                    }
                     // Locked out. Push back to queue and wait for radio call.
                     unprocessed_files.push(file_path);
                     continue;
                 }
                 
                 // TAG OUT: Lock the file
+                if canonical_path.contains("safe.txt") {
+                    tracing::info!("[Oracle] Locking '{}' for processing.", canonical_path);
+                }
                 active_jobs.insert(canonical_path.clone());
                 tick_locked_files.insert(canonical_path.clone());
                 
@@ -228,7 +237,7 @@ impl Oracle {
                 }
             }
 
-            // Put back what we couldn't handle
+            // Put back what we couldn't handle (PREPENDING to preserve order)
             if !unprocessed_files.is_empty() {
                  let files_to_index_arc = {
                     let state_guard = state.read().unwrap();
@@ -236,7 +245,14 @@ impl Oracle {
                 };
                 // Explicit locking
                 let mut lock = files_to_index_arc.lock().unwrap_or_else(|e| e.into_inner());
-                lock.extend(unprocessed_files);
+                
+                // FIX: Prepend unprocessed items to ensure FIFO causality
+                // 1. Take current (new) items out
+                let new_items = std::mem::take(&mut *lock);
+                // 2. Put unprocessed items back first
+                *lock = unprocessed_files;
+                // 3. Append new items
+                lock.extend(new_items);
             }
 
             // ----------------------------------------------------------------

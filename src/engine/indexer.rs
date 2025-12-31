@@ -31,13 +31,17 @@ impl Indexer {
         };
 
         if text_content.trim().is_empty() {
-            tracing::debug!("[Indexer] Skipping empty or binary file: {}", file_path);
+            // DIAGNOSTIC: Log why we are skipping
+            tracing::warn!("[Indexer] Skipping empty or binary file: {}", file_path);
             return Ok(());
         }
 
         // 2. Chunking
         let chunks = crate::storage::text_extraction::chunk_text(&text_content);
-        if chunks.is_empty() { return Ok(()); }
+        if chunks.is_empty() { 
+            tracing::warn!("[Indexer] File has content but produced 0 chunks: {}", file_path);
+            return Ok(()); 
+        }
 
         tracing::debug!("[Indexer] {} split into {} chunks", file_path, chunks.len());
 
@@ -88,9 +92,6 @@ impl Indexer {
         // ====================================================================
         // THE ARBITRATOR (Reality Check)
         // ====================================================================
-        // Before we delete anything, we check if the file actually exists.
-        // If the "Delete" ticket is outdated and the file is actually there,
-        // we shred the delete ticket and run an Index job instead.
         if std::path::Path::new(&file_path).exists() {
             tracing::warn!("[Arbitrator] Delete request for '{}' rejected - file exists on disk. Re-indexing instead.", file_path);
             return Self::index_file(state, file_path).await;
@@ -128,6 +129,7 @@ impl Indexer {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     } else {
+                        tracing::warn!("[Indexer] File {} is still 0 bytes after {} retries. Treating as empty.", path, max_retries);
                         return Ok(String::new());
                     }
                 }

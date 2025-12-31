@@ -28,3 +28,19 @@
 * **Decision:**
     * `journal_mode=WAL`: Readers don't block Writers.
     * `busy_timeout=5000`: Wait 5s for a lock instead of crashing immediately.
+
+### 6. The Zombie Mount (Testing Hazard)
+* **Why:** Killing the FUSE process (`pkill`) leaves the mount point locked by the kernel ("Transport endpoint is not connected") for several seconds.
+* **Decision:** Test harnesses must explicitly force-unmount (`umount -l`) before attempting to restart the daemon.
+
+### 6. The "Self-DDOS" (Concurrency Limits)
+* **Why:** Allowing 8 concurrent vector searches saturated the SQLite connection ("Database Locked"). This starved the Indexer and the Test Runner, causing timeouts.
+* **Decision:** Reduced `MAX_CONCURRENT_SEARCHERS` from 8 to 2. We prioritize *responsiveness* over raw throughput.
+
+### 7. Time Inversion (Queue Logic)
+* **Why:** When a file was locked (Lockout/Tagout), we pushed its ticket to the *back* of the queue. If a "Create" was locked and a "Delete" arrived later, we processed "Delete" then "Create", inverting reality.
+* **Decision:** Locked tickets are now **prepended** (pushed to the front) to strictly preserve FIFO causality.
+
+### 8. Test Suite Isolation (State Leakage)
+* **Why:** Running tests sequentially without restarting the daemon caused "Ghost Queries" from Test A to clog the queue during Test B.
+* **Decision:** The test runner must enforce a **Clean Slate Protocol**: Kill Daemon -> Force Unmount -> Wipe DB -> Start Daemon between *every* test case.
