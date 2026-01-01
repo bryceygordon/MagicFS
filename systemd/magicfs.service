@@ -22,7 +22,7 @@ StandardOutput=journal
 StandardError=journal
 
 # Security: Basic hardening for user services
-NoNewPrivileges=yes
+# NoNewPrivileges=yes
 
 [Install]
 WantedBy=default.target
