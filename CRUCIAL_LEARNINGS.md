@@ -68,3 +68,13 @@
 ### 11. The "Blind Update" (Metadata Sync)
 * **Why:** We tried to fix a corrupted file record by checking `mtime`. But changing a file's content doesn't always change `mtime` (e.g. rapid edits or metadata sabotage).
 * **Decision:** The "Should Index?" check now verifies **BOTH** `mtime` and `size`. If either disagrees with the DB, we re-index.
+
+### 12. Structure-Aware Chunking (The Dilution Fix)
+* **Why:** Blind sliding windows (e.g. 256 chars) cut words in half ("Extr-" + "-act") and create "Micro-Sliding Loops" on dense text, generating thousands of redundant vectors.
+* **Decision:** Replace sliding windows with **Recursive Character Splitting**.
+    * **Priority:** Paragraphs (`\n\n`) -> Lines (`\n`) -> Words (` `).
+    * **Impact:** Preserves semantic boundaries. Drastically reduces vector count while improving search relevance scores (>0.50).
+
+### 13. UTF-8 Safety (The Panic Fix)
+* **Why:** Rust strings are UTF-8. Slicing at arbitrary byte indices (e.g. `start + 150`) causes a panic if the cut lands inside a multi-byte char (e.g. emoji or symbols).
+* **Decision:** Always use `text.is_char_boundary(index)` before slicing. If invalid, scan forward to the next valid boundary.

@@ -11,7 +11,8 @@ base_tmp = "/tmp/magicfs-test-data"
 root_dir = os.path.join(base_tmp, "my_docs")
 sub_dir = os.path.join(root_dir, "projects")
 mount_point = "/tmp/magicfs-test-mount"
-db_path = "/tmp/.magicfs/index.db"
+# UPDATED PATH
+db_path = "/tmp/.magicfs_snowflake_m/index.db"
 binary = "./target/debug/magicfs"
 log_file = "/tmp/magicfs_debug.log"
 
@@ -20,8 +21,9 @@ if os.path.exists(mount_point):
     subprocess.run(["sudo", "umount", "-l", mount_point], stderr=subprocess.DEVNULL)
 if os.path.exists(base_tmp):
     subprocess.run(["sudo", "rm", "-rf", base_tmp])
-if os.path.exists("/tmp/.magicfs"):
-    subprocess.run(["sudo", "rm", "-rf", "/tmp/.magicfs"])
+# CLEANUP CORRECT DB DIR
+if os.path.exists("/tmp/.magicfs_snowflake_m"):
+    subprocess.run(["sudo", "rm", "-rf", "/tmp/.magicfs_snowflake_m"])
 
 os.makedirs(sub_dir)
 os.makedirs(mount_point, exist_ok=True)
@@ -35,7 +37,6 @@ with open(file_path, "w") as f:
 subprocess.run(["sudo", "pkill", "-x", "magicfs"])
 time.sleep(1)
 
-# Ensure log
 if os.path.exists(log_file): subprocess.run(["sudo", "rm", "-f", log_file])
 subprocess.run(["touch", log_file])
 subprocess.run(["chmod", "666", log_file])
@@ -53,8 +54,6 @@ if not os.path.exists(mirror_root):
     print("❌ FAILURE: /mirror directory missing!")
     exit(1)
 
-# "my_docs" should be visible
-# Note: Librarian watches absolute path, so basename is "my_docs"
 visible_roots = os.listdir(mirror_root)
 print(f"[Verify] Mirror Roots: {visible_roots}")
 if "my_docs" not in visible_roots:

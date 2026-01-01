@@ -11,12 +11,16 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    fmt().with_env_filter(EnvFilter::from_default_env()).init();
+    // FIX: Set a default filter if RUST_LOG is not set
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("magicfs=debug,info")); // Force debug for our crate
+
+    fmt().with_env_filter(filter).init();
 
     tracing::info!("=");
     tracing::info!("MagicFS Starting Up...");
-    tracing::info!("Branch: experiment/bge-m3");
-    tracing::info!("Model: BGE-M3 (1024 dims)");
+    tracing::info!("Branch: experiment/snowflake-m");
+    tracing::info!("Model: Snowflake Arctic Medium (768 dims)");
     tracing::info!("=");
 
     let args: Vec<String> = env::args().collect();
@@ -53,7 +57,7 @@ async fn main() -> Result<()> {
     // Initialize State
     let global_state = SharedState::new(magicfs::GlobalState::new().into());
     
-    // NEW: Populate watch_paths in state
+    // Populate watch_paths in state
     {
         let state_guard = global_state.read().unwrap();
         let mut wp = state_guard.watch_paths.lock().unwrap();
@@ -62,8 +66,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- ISOLATION UPDATE: Separate DB directory for M3 experiments ---
-    let db_path = PathBuf::from("/tmp").join(".magicfs_m3").join("index.db");
+    // --- ISOLATION UPDATE: Separate DB directory for Snowflake Medium ---
+    let db_dir = PathBuf::from("/tmp").join(".magicfs_snowflake_m");
+    let db_path = db_dir.join("index.db");
+    
+    // Ensure dir exists before init_connection (safety check)
+    std::fs::create_dir_all(&db_dir).unwrap();
+    
     init_connection(&global_state, db_path.to_str().unwrap())?;
 
     let mut oracle = Oracle::new(Arc::clone(&global_state))?;

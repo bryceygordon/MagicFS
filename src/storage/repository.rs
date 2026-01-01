@@ -35,14 +35,14 @@ impl<'a> Repository<'a> {
         ).unwrap_or(0);
 
         if has_vec_index == 0 {
-             // --- UPGRADE: BGE-M3 (1024 Dimensions) ---
+             // --- UPGRADE: Snowflake Arctic Medium (768 Dimensions) ---
              match self.conn.execute_batch(r#"
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                     file_id INTEGER,
-                    embedding float[1024] distance_metric=cosine
+                    embedding float[768] distance_metric=cosine
                 )
             "#) {
-                Ok(_) => tracing::info!("[Repository] Created vec_index table (1024 dim)"),
+                Ok(_) => tracing::info!("[Repository] Created vec_index table (768 dim)"),
                 Err(e) => tracing::warn!("[Repository] Failed to create vec_index: {}", e),
             }
         }
@@ -67,7 +67,6 @@ impl<'a> Repository<'a> {
         Ok(results)
     }
 
-    // --- FIX: Added return type -> Result<()> ---
     pub fn scan_all_files<F>(&self, mut callback: F) -> Result<()>
     where F: FnMut(u64, String) -> Result<()> 
     {

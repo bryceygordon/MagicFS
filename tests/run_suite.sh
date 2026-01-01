@@ -15,13 +15,16 @@ trap restore_term EXIT INT TERM HUP
 # Configuration
 MOUNT_POINT="/tmp/magicfs-test-mount"
 WATCH_DIR="/tmp/magicfs-test-data"
-# --- UPDATED: M3 ISOLATION PATH ---
-DB_PATH="/tmp/.magicfs_m3/index.db"
+# --- UPDATED: MATCHING MAIN.RS ISOLATION PATH ---
+DB_PATH="/tmp/.magicfs_snowflake_m/index.db"
 BINARY="./target/debug/magicfs"
 LOG_FILE="tests/magicfs.log"
 
 # FIX: Add 'tests' directory to PYTHONPATH so cases can import 'common'
 export PYTHONPATH=$(pwd)/tests
+
+# FIX: Export the log file path so common.py reads the CORRECT log on failure
+export MAGICFS_LOG_FILE=$(pwd)/"$LOG_FILE"
 
 # Keep sudo alive
 sudo -v
@@ -42,7 +45,7 @@ cleanup_environment() {
     # 3. Wipe Data
     sudo rm -f "$DB_PATH" 2>/dev/null
     sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" 2>/dev/null
-    # Ensure parent dir exists (since it's now .magicfs_m3)
+    # Ensure parent dir exists
     mkdir -p "$(dirname "$DB_PATH")"
     
     # 4. Recreate Dirs
@@ -50,12 +53,10 @@ cleanup_environment() {
 }
 
 # 1. Build
-echo "[Build] Compiling MagicFS (BGE-M3 Edition)..."
+echo "[Build] Compiling MagicFS (Snowflake-M Edition)..."
 cargo build --quiet || exit 1
 
-# 2. Run Rust Unit Tests (NEW STEP)
-# This ensures internal logic (like Repository streaming) works 
-# before we try to mount the filesystem.
+# 2. Run Rust Unit Tests
 echo "[Unit] Running Rust Unit Tests..."
 cargo test --lib --quiet || exit 1
 echo "✅ Unit Tests Passed"
@@ -77,7 +78,8 @@ for test_file in $(ls tests/cases/*.py | sort); do
     sudo nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
     
     # Wait for daemon to stabilize (HollowDrive ready)
-    sleep 2
+    # Snowflake M might take a moment to download on first run
+    sleep 3
     
     # C. Run Test
     # Run unbuffered (-u)

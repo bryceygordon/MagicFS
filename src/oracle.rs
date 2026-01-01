@@ -1,15 +1,4 @@
 // FILE: src/oracle.rs
-//! Oracle: The Async Brain (Orchestrator)
-//!
-//! Refactored in Phase 6.9 (The Lockout/Tagout System).
-//! Role:
-//! 1. Manages the Thread/Actor Lifecycle.
-//! 2. Monitors the Event Loop.
-//! 3. Delegates work to `Indexer` and `Searcher`.
-//! 4. Enforces Concurrency Limits via Semaphores.
-//! 5. PRIORITIZES Indexing.
-//! 6. ENFORCES SERIALIZATION per file (The "Foreman & Radio").
-
 use crate::state::{SharedState, EmbeddingRequest};
 use crate::error::{Result, MagicError};
 use crate::engine::indexer::Indexer;
@@ -28,23 +17,19 @@ use std::collections::HashSet;
 
 // Hardening: Concurrency Limits
 const MAX_CONCURRENT_INDEXERS: usize = 2;
-// REVISED: Reduced from 8 to 2 to prevent SQLite starvation/locking during heavy load.
 const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
 pub struct Oracle {
     pub state: SharedState,
-    pub runtime: Arc<tokio::runtime::Runtime>,
+    // REMOVED: Nested runtime field
     pub task_handle: Option<JoinHandle<()>>,
 }
 
 impl Oracle {
     pub fn new(state: SharedState) -> Result<Self> {
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
-
+        // No new runtime creation here. We rely on #[tokio::main]
         Ok(Self {
             state,
-            runtime: Arc::new(runtime),
             task_handle: None,
         })
     }
@@ -52,9 +37,12 @@ impl Oracle {
     pub fn start(&mut self) -> Result<()> {
         self.start_embedding_actor()?;
         let state = Arc::clone(&self.state);
-        let handle = self.runtime.spawn(async move {
+        
+        // FIX: Use tokio::spawn directly (uses global runtime)
+        let handle = tokio::spawn(async move {
             Oracle::run_event_loop(state).await;
         });
+        
         self.task_handle = Some(handle);
         tracing::info!("[Oracle] Started Orchestrator loop");
         Ok(())
@@ -70,13 +58,13 @@ impl Oracle {
         }
 
         std::thread::spawn(move || {
-            // --- UPGRADE: BGE-M3 ---
-            tracing::info!("[EmbeddingActor] Starting dedicated BGE-M3 model thread (High RAM Usage)...");
-            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGEM3));
+            tracing::info!("[EmbeddingActor] Starting Snowflake Arctic Embed Medium (768 dims)...");
+            
+            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::SnowflakeArcticEmbedM));
             
             let mut model = match model_result {
                 Ok(m) => {
-                    tracing::info!("[EmbeddingActor] BGE-M3 loaded successfully");
+                    tracing::info!("[EmbeddingActor] Snowflake Medium loaded successfully");
                     m
                 },
                 Err(e) => {
@@ -124,18 +112,12 @@ impl Oracle {
 
         let mut processed_queries: LruCache<String, ()> = LruCache::new(NonZeroUsize::new(1000).unwrap());
         let mut last_index_version = 0;
-
-        // LOCKOUT/TAGOUT SYSTEM
-        // The Ledger: Tracks files currently being processed.
         let mut active_jobs: HashSet<String> = HashSet::new();
-        // The Radio: Workers report back here when done.
         let (completion_tx, mut completion_rx) = mpsc::channel::<String>(100);
-
         let index_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_INDEXERS));
         let search_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SEARCHERS));
 
         loop {
-            // Tick to keep the loop breathing
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             // 1. Check for Index Changes
@@ -151,7 +133,6 @@ impl Oracle {
             }
 
             // 2. THE RADIO CHECK (Update The Ledger)
-            // Drain all "Job Complete" messages from the workers
             while let Ok(finished_path) = completion_rx.try_recv() {
                 if finished_path.contains("safe.txt") {
                     tracing::info!("[Oracle] Radio received: Worker finished '{}'. Removing lock.", finished_path);
@@ -159,13 +140,8 @@ impl Oracle {
                 active_jobs.remove(&finished_path);
             }
 
-            // ----------------------------------------------------------------
             // PRIORITY 1: INDEXING
-            // ----------------------------------------------------------------
-            
             let mut unprocessed_files: Vec<String> = Vec::new();
-            
-            // We clear local tick tracking (prevent double-booking in a single batch)
             let mut tick_locked_files: HashSet<String> = HashSet::new();
 
             let files_to_process: Vec<String> = {
@@ -174,29 +150,24 @@ impl Oracle {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                // Drain ALL files
                 files_to_index_lock.drain(..).collect()
             };
 
             for file_path in files_to_process {
-                // Determine Canonical Path (strip "DELETE:" prefix)
                 let (canonical_path, is_delete) = if file_path.starts_with("DELETE:") {
                     (file_path.trim_start_matches("DELETE:").to_string(), true)
                 } else {
                     (file_path.clone(), false)
                 };
                 
-                // CHECK THE BOARD: Is this file already being worked on?
                 if active_jobs.contains(&canonical_path) || tick_locked_files.contains(&canonical_path) {
                     if canonical_path.contains("safe.txt") {
                         tracing::info!("[Oracle] Lockout active for '{}'. Re-queueing ticket.", canonical_path);
                     }
-                    // Locked out. Push back to queue and wait for radio call.
                     unprocessed_files.push(file_path);
                     continue;
                 }
                 
-                // TAG OUT: Lock the file
                 if canonical_path.contains("safe.txt") {
                     tracing::info!("[Oracle] Locking '{}' for processing.", canonical_path);
                 }
@@ -207,18 +178,14 @@ impl Oracle {
                 let tx = completion_tx.clone();
                 let path_for_radio = canonical_path.clone();
 
-                // SPAWN WORKER (With Radio)
                 if is_delete {
-                    // DELETE Task
                     tokio::spawn(async move {
                         if let Err(e) = Indexer::remove_file(state_ref, path_for_radio.clone()).await {
                             tracing::error!("[Oracle] File removal failed: {}", e);
                         }
-                        // Radio back: "I'm done"
                         let _ = tx.send(path_for_radio).await;
                     });
                 } else {
-                    // INDEX Task (Needs Semaphore)
                     match index_semaphore.clone().try_acquire_owned() {
                         Ok(permit) => {
                              tokio::spawn(async move {
@@ -226,12 +193,10 @@ impl Oracle {
                                 if let Err(e) = Indexer::index_file(state_ref, file_path).await {
                                     tracing::error!("[Oracle] Indexing failed: {}", e);
                                 }
-                                // Radio back: "I'm done"
                                 let _ = tx.send(path_for_radio).await;
                             });
                         },
                         Err(_) => {
-                            // Semaphore full. Release lock in Ledger and re-queue.
                             active_jobs.remove(&canonical_path); 
                             unprocessed_files.push(file_path);
                         }
@@ -239,28 +204,18 @@ impl Oracle {
                 }
             }
 
-            // Put back what we couldn't handle (PREPENDING to preserve order)
             if !unprocessed_files.is_empty() {
                  let files_to_index_arc = {
                     let state_guard = state.read().unwrap();
                     state_guard.files_to_index.clone()
                 };
-                // Explicit locking
                 let mut lock = files_to_index_arc.lock().unwrap_or_else(|e| e.into_inner());
-                
-                // FIX: Prepend unprocessed items to ensure FIFO causality
-                // 1. Take current (new) items out
                 let new_items = std::mem::take(&mut *lock);
-                // 2. Put unprocessed items back first
                 *lock = unprocessed_files;
-                // 3. Append new items
                 lock.extend(new_items);
             }
 
-            // ----------------------------------------------------------------
             // PRIORITY 2: SEARCHING
-            // ----------------------------------------------------------------
-            
             let queries_to_process: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let inode_store = &state_guard.inode_store;
@@ -272,7 +227,7 @@ impl Oracle {
                         let has_results = inode_store.has_results(*inode);
                         if !is_processed && !has_results { true } else { false }
                     })
-                    .take(5) // Throttle
+                    .take(5)
                     .map(|(inode, query)| (query, inode))
                     .collect()
             };

@@ -1,12 +1,13 @@
 #!/bin/bash
+# FILE: dev.sh
 set -e
 
 # --- Config ---
 MOUNT="$HOME/MagicFS"
 WATCH_A="$HOME/me"
 WATCH_B="$HOME/sync/vault"
-# --- UPDATED: M3 ISOLATION PATH ---
-DB_DIR="/tmp/.magicfs_m3"
+# --- UPDATED: SNOWFLAKE M ISOLATION PATH ---
+DB_DIR="/tmp/.magicfs_snowflake_m"
 
 echo "🔑 Authorizing sudo..."
 sudo -v
@@ -38,9 +39,9 @@ fi
 if [ -d "$MOUNT" ]; then
     echo "    🗑️  Removing old mount directory..."
     if ! sudo rm -rf "$MOUNT"; then
-         echo "    ❌ FATAL: 'rm' failed. The mount is still stuck."
-         ls -ld "$MOUNT"
-         exit 1
+          echo "    ❌ FATAL: 'rm' failed. The mount is still stuck."
+          ls -ld "$MOUNT"
+          exit 1
     fi
 fi
 
@@ -59,7 +60,7 @@ mkdir -p "$WATCH_A"
 mkdir -p "$WATCH_B"
 mkdir -p "$DB_DIR"
 
-echo "🔨 Building (BGE-M3)..."
+echo "🔨 Building (Snowflake Arctic Medium)..."
 cd "$(dirname "$0")"
 cargo build
 

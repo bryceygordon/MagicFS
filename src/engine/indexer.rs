@@ -20,16 +20,12 @@ impl Indexer {
         tracing::info!("[Indexer] Processing: {}", file_path);
         
         // 1. Extraction (with retries for file locks AND partial writes)
-        // Refactored: We now handle PermissionDenied INSIDE extract_with_retry
-        // so we don't drop the ball on locked files.
         let text_content = match Self::extract_with_retry(&file_path).await {
             Ok(t) => t,
             Err(e) => return Err(e),
         };
 
         if text_content.trim().is_empty() {
-            // DIAGNOSTIC: Log why we are skipping
-            // Check if it's actually 0 bytes on disk or just failed extraction
             if let Ok(m) = std::fs::metadata(&file_path) {
                 if m.len() > 0 {
                     tracing::warn!("[Indexer] Skipping NON-EMPTY file that produced 0 text (Binary?): {}", file_path);
@@ -56,7 +52,7 @@ impl Indexer {
             let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
             let repo = Repository::new(conn);
 
-            // Mock inode logic (same as before)
+            // Mock inode logic
             let inode = file_path.len() as u64 + 0x100000; 
             let metadata = std::fs::metadata(&file_path).map_err(MagicError::Io)?;
             let mtime = metadata.modified().map_err(MagicError::Io)?.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -119,13 +115,12 @@ impl Indexer {
     }
 
     async fn extract_with_retry(path: &str) -> Result<String> {
-        let max_retries = 20; // Hardening: Increased from 10 to 20 (2.0s total)
+        let max_retries = 20; 
         let mut last_error = None;
 
         for attempt in 1..=max_retries {
             let path_owned = path.to_string();
             
-            // Check metadata size first
             if let Ok(m) = std::fs::metadata(path) {
                 if m.len() == 0 { 
                     if attempt < max_retries {
@@ -137,9 +132,6 @@ impl Indexer {
                         return Ok(String::new());
                     }
                 }
-            } else {
-                // Metadata failed? Could be transient permission or deleted.
-                // We'll let the spawn_blocking call handle the error detail.
             }
 
             let result = tokio::task::spawn_blocking(move || {
@@ -147,38 +139,25 @@ impl Indexer {
             }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Task panic")))?;
 
             match result {
-                Ok(content) => {
-                    // Success!
-                    return Ok(content);
-                },
+                Ok(content) => return Ok(content),
                 Err(MagicError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
-                    // CRITICAL FIX: Retry on PermissionDenied
                     if attempt < max_retries {
                         tracing::warn!("[Indexer] Locked/PermissionDenied for {} (attempt {}/{}), waiting...", path, attempt, max_retries);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     } else {
-                        // Hard fail after retries
                         return Err(MagicError::Io(e));
                     }
                 }
                 Err(e) => {
-                    // Other errors (NotFound, etc)
                     last_error = Some(e);
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
         
-        // If we failed after all retries
         tracing::warn!("[Indexer] Failed to extract from {} after retries. Last error: {:?}", path, last_error);
-        
-        // If we have a specific error, return it. Otherwise empty string.
-        if let Some(e) = last_error {
-            Err(e)
-        } else {
-            Ok(String::new())
-        }
+        if let Some(e) = last_error { Err(e) } else { Ok(String::new()) }
     }
 
     fn invalidate_cache(state: SharedState) -> Result<()> {
