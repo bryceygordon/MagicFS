@@ -6,8 +6,8 @@ set -e
 MOUNT="$HOME/MagicFS"
 WATCH_A="$HOME/me"
 WATCH_B="$HOME/sync/vault"
-# --- UPDATED: SNOWFLAKE M ISOLATION PATH ---
-DB_DIR="/tmp/.magicfs_snowflake_m"
+# --- UPDATED: NOMIC V1.5 ISOLATION PATH ---
+DB_DIR="/tmp/.magicfs_nomic"
 
 echo "🔑 Authorizing sudo..."
 sudo -v
@@ -60,7 +60,7 @@ mkdir -p "$WATCH_A"
 mkdir -p "$WATCH_B"
 mkdir -p "$DB_DIR"
 
-echo "🔨 Building (Snowflake Arctic Medium)..."
+echo "🔨 Building (Nomic Embed v1.5)..."
 cd "$(dirname "$0")"
 cargo build
 

@@ -69,8 +69,8 @@ impl Indexer {
 
         // 4. Generate & Insert Embeddings
         for chunk in chunks {
-            // Note: This calls the Async Embedding Actor
-            let embedding = request_embedding(&state, chunk).await?;
+            // is_query = false (We are indexing DOCUMENTS)
+            let embedding = request_embedding(&state, chunk, false).await?;
             
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;

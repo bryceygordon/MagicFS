@@ -14,6 +14,8 @@ type EmbeddingResult = std::result::Result<Vec<f32>, MagicError>;
 /// Request sent to the Embedding Actor
 pub struct EmbeddingRequest {
     pub content: String,
+    // NEW: Critical flag for Asymmetric Retrieval (Query vs Doc)
+    pub is_query: bool,
     pub respond_to: oneshot::Sender<EmbeddingResult>,
 }
 

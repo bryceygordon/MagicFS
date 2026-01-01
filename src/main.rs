@@ -19,8 +19,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("=");
     tracing::info!("MagicFS Starting Up...");
-    tracing::info!("Branch: experiment/snowflake-m");
-    tracing::info!("Model: Snowflake Arctic Medium (768 dims)");
+    tracing::info!("Branch: experiment/nomic-embed-v1.5");
+    tracing::info!("Model: Nomic v1.5 (768 dims)");
     tracing::info!("=");
 
     let args: Vec<String> = env::args().collect();
@@ -66,8 +66,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- ISOLATION UPDATE: Separate DB directory for Snowflake Medium ---
-    let db_dir = PathBuf::from("/tmp").join(".magicfs_snowflake_m");
+    // --- ISOLATION UPDATE: Separate DB directory for Nomic v1.5 ---
+    let db_dir = PathBuf::from("/tmp").join(".magicfs_nomic");
     let db_path = db_dir.join("index.db");
     
     // Ensure dir exists before init_connection (safety check)

@@ -9,7 +9,6 @@ use tokio::sync::{mpsc, Semaphore};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use anyhow;
 use std::time::Duration;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -58,31 +57,43 @@ impl Oracle {
         }
 
         std::thread::spawn(move || {
-            tracing::info!("[EmbeddingActor] Starting Snowflake Arctic Embed Medium (768 dims)...");
-            
-            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::SnowflakeArcticEmbedM));
-            
+            // --- UPGRADE: Nomic Embed v1.5 (768 dims) ---
+            tracing::info!("[EmbeddingActor] Starting Nomic Embed v1.5 (SOTA)...");
+
+            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::NomicEmbedTextV15));
+
             let mut model = match model_result {
                 Ok(m) => {
-                    tracing::info!("[EmbeddingActor] Snowflake Medium loaded successfully");
+                    tracing::info!("[EmbeddingActor] Nomic v1.5 loaded successfully");
                     m
                 },
                 Err(e) => {
                     tracing::error!("[EmbeddingActor] Failed to load model: {}", e);
-                    return; 
+                    return;
                 }
             };
 
             while let Some(request) = rx.blocking_recv() {
-                let EmbeddingRequest { content, respond_to } = request;
-                
-                let preview: String = content.chars().take(20).collect();
-                tracing::debug!("[EmbeddingActor] Embedding '{}'...", preview);
+                // Deconstruct request to get flag
+                let EmbeddingRequest { content, is_query, respond_to } = request;
 
-                let result = model.embed(vec![content], None)
+                let preview: String = content.chars().take(20).collect();
+
+                // --- THE PREFIX FIX (Asymmetric Search) ---
+                let final_content = if is_query {
+                    // Query Prefix
+                    tracing::debug!("[EmbeddingActor] Prepending 'search_query: ' to '{}'...", preview);
+                    format!("search_query: {}", content)
+                } else {
+                    // Document Prefix
+                    // Nomic v1.5 *requires* this for maximum accuracy
+                    format!("search_document: {}", content)
+                };
+
+                let result = model.embed(vec![final_content], None)
                     .map(|mut res| res.remove(0))
                     .map_err(|e| MagicError::Embedding(format!("FastEmbed error: {}", e)));
-                
+
                 if let Err(_) = respond_to.send(result) {
                     tracing::warn!("[EmbeddingActor] Receiver dropped!");
                 }

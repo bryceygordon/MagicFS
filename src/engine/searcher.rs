@@ -9,7 +9,8 @@ pub struct Searcher;
 impl Searcher {
     pub async fn perform_search(state: SharedState, query: String, expected_inode: u64) -> Result<()> {
         // 1. Generate Embedding
-        let query_embedding = match request_embedding(&state, query.clone()).await {
+        // is_query = true (CRITICAL: Tells Oracle to apply "search_query: " prefix)
+        let query_embedding = match request_embedding(&state, query.clone(), true).await {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!("[Searcher] Embedding failed for '{}': {}", query, e);
