@@ -4,6 +4,7 @@ set -e
 # --- Config ---
 MOUNT="$HOME/MagicFS"
 WATCH="$HOME/me"
+DB_DIR="/tmp/.magicfs"
 
 echo "🔑 Authorizing sudo..."
 sudo -v
@@ -11,7 +12,7 @@ sudo -v
 echo "☢️  Cleanup Sequence Initiated..."
 
 # 1. Kill processes
-sudo fuser -k -m "$MOUNT" 2>/dev/null || true
+sudo pkill -x magicfs || true
 
 # 2. Unmount Loop (Wait for it to actually detach)
 if mountpoint -q "$MOUNT" 2>/dev/null || grep -qs "$MOUNT" /proc/mounts; then
@@ -31,10 +32,9 @@ if mountpoint -q "$MOUNT" 2>/dev/null || grep -qs "$MOUNT" /proc/mounts; then
     done
 fi
 
-# 3. Delete directory (Only if it exists)
+# 3. Delete mount directory
 if [ -d "$MOUNT" ]; then
-    echo "   🗑️  Removing old directory..."
-    # If this fails, it means the mount is still ghosting us
+    echo "   🗑️  Removing old mount directory..."
     if ! sudo rm -rf "$MOUNT"; then
          echo "   ❌ FATAL: 'rm' failed. The mount is still stuck."
          ls -ld "$MOUNT"
@@ -42,7 +42,13 @@ if [ -d "$MOUNT" ]; then
     fi
 fi
 
-# 4. Recreate
+# 4. NEW: Delete Database (Fixes Permission Error)
+if [ -d "$DB_DIR" ]; then
+    echo "   🗄️  Wiping old database..."
+    sudo rm -rf "$DB_DIR"
+fi
+
+# 5. Recreate Mount
 echo "   ✨ Creating fresh mountpoint..."
 mkdir -p "$MOUNT"
 
@@ -51,4 +57,5 @@ cd "$(dirname "$0")"
 cargo build
 
 echo "🚀 Launching..."
-RUST_BACKTRACE=1 ./target/debug/magicfs "$MOUNT" "$WATCH"
+# RUST_LOG=debug ensures we see the read operations
+RUST_LOG=debug ./target/debug/magicfs "$MOUNT" "$WATCH"
