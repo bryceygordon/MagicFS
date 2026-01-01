@@ -13,21 +13,34 @@ class MagicTest:
         self.db_path = sys.argv[1]
         self.mount_point = sys.argv[2]
         self.watch_dir = sys.argv[3]
-        self.log_file = "tests/magicfs.log"
+        
+        # NEW: Read log location from Env, default to tmp
+        self.log_file = os.environ.get("MAGICFS_LOG_FILE", "/tmp/magicfs_debug.log")
 
     def dump_logs(self, lines=100):
         """Reads the log file directly and dumps it to stdout."""
-        print(f"\n--- FATAL ERROR: DUMPING LAST {lines} LOG LINES ---")
+        print(f"\n--- FATAL ERROR: DUMPING LAST {lines} LOG LINES ({self.log_file}) ---")
         try:
             if os.path.exists(self.log_file):
                 with open(self.log_file, "r") as f:
                     content = f.readlines()
+                    
+                    if not content:
+                        print("⚠️  Log file exists but is EMPTY.")
+                    
                     for line in content[-lines:]:
                         print(line.rstrip())
             else:
                 print(f"❌ Log file not found at {self.log_file}")
         except Exception as e:
             print(f"❌ Failed to read log file: {e}")
+            # Fallback: Try system cat in case of weird permission issues
+            try:
+                import subprocess
+                print("--- Trying system 'cat' ---")
+                subprocess.run(["cat", self.log_file])
+            except:
+                pass
         print("---------------------------------------------------\n")
 
     def create_file(self, rel_path, content):
@@ -58,7 +71,6 @@ class MagicTest:
         except:
             return 0
 
-    # THE NEW "MOTION DETECTOR" FUNCTION
     def wait_for_stable_db(self, stability_duration=3, max_wait=120):
         """
         Polls the DB. 
@@ -127,7 +139,6 @@ class MagicTest:
         self.dump_logs()
         sys.exit(1)
 
-    # RESTORED MISSING FUNCTION
     def assert_file_not_indexed(self, filename_substr):
         # We wait a moment to ensure any pending ops would have finished
         time.sleep(1.0)
@@ -152,7 +163,8 @@ class MagicTest:
             except OSError:
                 pass 
             
-            print(f"   ... waiting for Oracle (attempt {i+1}/{retries})")
+            if i % 5 == 0:
+                print(f"   ... waiting for Oracle (attempt {i+1}/{retries})")
             time.sleep(0.5)
             
         print(f"❌ FAILURE: Search for '{query}' failed.")
