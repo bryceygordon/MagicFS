@@ -1,30 +1,21 @@
-# Session Handover - Jan 1, 2026 (Session 2)
+# 🤝 Session Handover: The Snowflake Upgrade
 
-## 🛑 Current Status
-- **System**: Stable. All tests passing (`tests/run_suite.sh`).
-- **Features**: Read/Write/Search/Mirror/Multi-Root are LIVE.
-- **Environment**: `./dev.sh` mounts `~/me` and `~/sync/vault`.
+## Context
+We have successfully stabilized the "Experimentation Infrastructure" allowing us to swap AI models using git branches. 
 
-## 🧠 Context: The "Magic" Deficit
-While the *plumbing* is perfect, the *intelligence* needs work.
-1.  **Semantic Drift**: Searching "Beef" ranks "Chicken" too high (Model lacks nuance).
-2.  **Title Blindness**: Filenames aren't weighted heavily enough.
+**Current State (Branch: experiment/snowflake-xs):**
+- Runs **Snowflake Arctic Embed XS**.
+- **Status:** Stable, compiles, tests pass.
+- **Problem:** Search relevance score is `0.41`, which is too low for a "Magical" feeling. The 384-dimensional vector space is too crowded.
 
-## 🎯 Next Session Goals
-**Theme: "Making it Smart"**
+## 🎯 Goal for Next Session
+**Upgrade to Snowflake Arctic Medium (768 dims).**
+We need to apply the specific code changes to:
+1.  `src/oracle.rs` (Model selection)
+2.  `src/storage/repository.rs` (Schema width)
+3.  `src/main.rs` (Data isolation path)
 
-1.  **Upgrade AI Model**:
-    * Switch from `BGESmallENV15` (Tiny) to **`BGE-M3`** or **`Nomic-Embed`** (State of the Art).
-    * *Task*: Update `oracle.rs` and `Cargo.toml`.
-
-2.  **Context Injection**:
-    * Modify `src/storage/text_extraction.rs` or `indexer.rs`.
-    * *Logic*: Prepend `File: {filename}\n` to every chunk before embedding.
-
-3.  **Hybrid Scoring**:
-    * Modify `src/storage/repository.rs`.
-    * *Logic*: `SELECT ..., (1.0 - distance) + (CASE WHEN path LIKE %q% THEN 0.2 ELSE 0 END) as score`.
-
-## 📝 Commands
-- **Start**: `./dev.sh` (Auto-cleans DB, builds, mounts with sudo).
-- **Test Suite**: `tests/run_suite.sh`
+## 📝 Branch Info
+You are now on `experiment/snowflake-m`.
+- **Base:** `experiment/snowflake-xs` (The stable XS code)
+- **Task:** Apply the "Medium" upgrade code.
