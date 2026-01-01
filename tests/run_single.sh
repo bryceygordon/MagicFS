@@ -5,6 +5,18 @@ if [ -z "$TEST_FILE" ]; then
     exit 1
 fi
 
+# ==================================================================================
+# ⚠️  CRITICAL TERMINAL CONTROL SECTION
+# ==================================================================================
+SAVED_TERM=$(stty -g)
+
+restore_term() {
+    stty "$SAVED_TERM" 2>/dev/null || stty sane
+}
+
+trap restore_term EXIT INT TERM HUP
+# ==================================================================================
+
 # --- NEW LOGGING CONFIGURATION ---
 LOG_FILE="/tmp/magicfs_debug.log"
 

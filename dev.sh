@@ -51,9 +51,9 @@ fi
 
 # 5. Recreate Dirs
 echo "   ✨ Creating directories..."
+# We create the mount point as the normal user so the folder belongs to you 
+# before the mount overlays it.
 mkdir -p "$MOUNT"
-# We assume WATCH_A and WATCH_B exist since they are your real data.
-# mkdir -p is safe to run on existing dirs (it does nothing).
 mkdir -p "$WATCH_A"
 mkdir -p "$WATCH_B"
 
@@ -62,5 +62,8 @@ cd "$(dirname "$0")"
 cargo build
 
 echo "🚀 Launching with Multi-Root: $WATCH_A, $WATCH_B"
-# Pass both paths separated by a comma
-RUST_LOG=info ./target/debug/magicfs "$MOUNT" "$WATCH_A,$WATCH_B"
+
+# FIX: Use sudo -E to preserve RUST_LOG and run as root.
+# This ensures 'AllowOther' works correctly, allowing you to browse
+# the filesystem without permission prompts.
+sudo -E ./target/debug/magicfs "$MOUNT" "$WATCH_A,$WATCH_B"
