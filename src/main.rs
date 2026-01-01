@@ -18,39 +18,48 @@ async fn main() -> Result<()> {
 
     tracing::info!("=");
     tracing::info!("MagicFS Starting Up...");
-    tracing::info!("Phase 7: The Universal Reader");
+    tracing::info!("Phase 8: Multi-Root Monitoring");
     tracing::info!("=");
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <mountpoint> [watch_dir]", args[0]);
+        eprintln!("Usage: {} <mountpoint> [watch_dirs (comma separated)]", args[0]);
         return Ok(());
     }
 
     let mountpoint_str = args[1].clone();
     let mountpoint: PathBuf = mountpoint_str.clone().into();
     
-    let watch_dir_str = args.get(2).map(|s| s.clone()).unwrap_or_else(|| {
+    // NEW: Handle comma-separated paths
+    let watch_dirs_input = args.get(2).map(|s| s.clone()).unwrap_or_else(|| {
         env::current_dir().unwrap().to_string_lossy().to_string()
     });
-    let watch_dir = PathBuf::from(&watch_dir_str);
+
+    let watch_dirs: Vec<PathBuf> = watch_dirs_input
+        .split(',')
+        .map(|s| PathBuf::from(s.trim()))
+        .collect();
 
     tracing::info!("Mountpoint: {}", mountpoint.display());
-    tracing::info!("Watch directory: {}", watch_dir.display());
+    tracing::info!("Watch directories: {:?}", watch_dirs);
 
     // ========== SAFETY CHECKS (Anti-Feedback Switch) ==========
     let abs_mount = std::fs::canonicalize(&mountpoint).unwrap_or(mountpoint.clone());
-    let abs_watch = std::fs::canonicalize(&watch_dir).unwrap_or(watch_dir.clone());
+    
+    for watch_dir in &watch_dirs {
+        // We use unwrap_or to handle cases where a dir might not exist yet (though it should)
+        let abs_watch = std::fs::canonicalize(watch_dir).unwrap_or(watch_dir.clone());
+        tracing::debug!("Safety Check: Mount={:?}, Watch={:?}", abs_mount, abs_watch);
 
-    tracing::debug!("Safety Check: Mount={:?}, Watch={:?}", abs_mount, abs_watch);
+        if abs_watch.starts_with(&abs_mount) {
+            tracing::error!("FATAL: Feedback Loop Detected!");
+            tracing::error!("Watch dir {:?} is inside Mount point.", abs_watch);
+            panic!("Feedback Loop Detected");
+        }
 
-    if abs_watch.starts_with(&abs_mount) {
-        tracing::error!("FATAL: Feedback Loop Detected!");
-        panic!("Feedback Loop Detected: Watch dir is inside Mount point.");
-    }
-
-    if abs_mount.starts_with(&abs_watch) {
-         tracing::warn!("⚠️  WARNING: Mount point is inside Watch Directory.");
+        if abs_mount.starts_with(&abs_watch) {
+             tracing::warn!("⚠️  WARNING: Mount point is inside Watch Directory {:?}.", abs_watch);
+        }
     }
 
     // ========== INITIALIZE GLOBAL STATE ==========
@@ -69,7 +78,12 @@ async fn main() -> Result<()> {
 
     // ========== INITIALIZE LIBRARIAN (Background Watcher) ==========
     let mut librarian = Librarian::new(Arc::clone(&global_state));
-    librarian.add_watch_path(watch_dir_str)?;
+    
+    // NEW: Add all paths to librarian
+    for path in watch_dirs {
+        librarian.add_watch_path(path.to_string_lossy().to_string())?;
+    }
+    
     librarian.start()?;
     tracing::info!("✓ Librarian (watcher) started");
 

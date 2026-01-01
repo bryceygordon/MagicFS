@@ -194,7 +194,7 @@ impl Filesystem for HollowDrive {
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
-        atime: Option<fuser::TimeOrNow>,
+        _atime: Option<fuser::TimeOrNow>, // FIX: Renamed to _atime
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
         _fh: Option<u64>,
@@ -209,7 +209,6 @@ impl Filesystem for HollowDrive {
             let state_guard = self.state.read().unwrap();
             state_guard.refresh_signal.store(true, std::sync::atomic::Ordering::Relaxed);
             
-            // Fixed warning: removed 'mut'
             let attr = fuser::FileAttr {
                 ino: 4, size: 0, blocks: 0, atime: SystemTime::now(),
                 mtime: SystemTime::now(), ctime: SystemTime::now(),
@@ -240,21 +239,14 @@ impl Filesystem for HollowDrive {
                 }
             }
 
-            // Handle Times (atime/mtime)
-            // Fixed warning: Used 'atime'
-            let now = SystemTime::now();
-            let new_mtime = match mtime {
-                Some(fuser::TimeOrNow::SpecificTime(t)) => t,
-                Some(fuser::TimeOrNow::Now) => now,
-                None => now, // Default if not provided but update requested? 
-                             // No, logic below only sets if mtime param was Some. 
-                             // But we need to handle if ONE is Some and OTHER is None.
-            };
-            
-            // Rust std::fs only supports set_times easily via external crates or set_modified.
-            // set_modified() only updates mtime. 
-            // Since mtime is crucial for editors, we focus on that.
-            if let Some(_) = mtime {
+            // Handle Times (mtime)
+            // We ignore atime requests because standard Rust doesn't support setting it easily,
+            // and mtime is what matters for editor save detection.
+            if let Some(mtime_val) = mtime {
+                let new_mtime = match mtime_val {
+                    fuser::TimeOrNow::SpecificTime(t) => t,
+                    fuser::TimeOrNow::Now => SystemTime::now(),
+                };
                 let _ = file.set_modified(new_mtime);
             }
             
@@ -280,7 +272,6 @@ impl Filesystem for HollowDrive {
 
     fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
         use fuser::FileType;
-        // FIX: Use String to own data
         let entries = vec![
             (1, FileType::Directory, ".".to_string()),
             (1, FileType::Directory, "..".to_string()),
@@ -314,7 +305,6 @@ impl Filesystem for HollowDrive {
             let mut items = entries.clone();
             let state_guard = self.state.read().unwrap();
             
-            // FIX: Clone the query strings so the vector owns them
             for (search_inode, query) in state_guard.inode_store.active_queries() {
                 items.push((search_inode, FileType::Directory, query.clone()));
             }
@@ -336,7 +326,6 @@ impl Filesystem for HollowDrive {
                     let score_str = format!("{:.2}", result.score);
                     let filename = format!("{}_{}", score_str, result.filename);
                     let file_inode = state_guard.inode_store.hash_to_inode(&format!("{}-{}", ino, &filename));
-                    // Push owned string
                     items.push((file_inode, FileType::RegularFile, filename));
                  }
                  

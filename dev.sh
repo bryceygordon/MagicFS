@@ -3,7 +3,8 @@ set -e
 
 # --- Config ---
 MOUNT="$HOME/MagicFS"
-WATCH="$HOME/me"
+WATCH_A="$HOME/me"
+WATCH_B="$HOME/sync/vault"
 DB_DIR="/tmp/.magicfs"
 
 echo "🔑 Authorizing sudo..."
@@ -42,20 +43,24 @@ if [ -d "$MOUNT" ]; then
     fi
 fi
 
-# 4. NEW: Delete Database (Fixes Permission Error)
+# 4. Delete Database (Fixes Permission Error from Tests)
 if [ -d "$DB_DIR" ]; then
     echo "   🗄️  Wiping old database..."
     sudo rm -rf "$DB_DIR"
 fi
 
-# 5. Recreate Mount
-echo "   ✨ Creating fresh mountpoint..."
+# 5. Recreate Dirs
+echo "   ✨ Creating directories..."
 mkdir -p "$MOUNT"
+# We assume WATCH_A and WATCH_B exist since they are your real data.
+# mkdir -p is safe to run on existing dirs (it does nothing).
+mkdir -p "$WATCH_A"
+mkdir -p "$WATCH_B"
 
 echo "🔨 Building..."
 cd "$(dirname "$0")"
 cargo build
 
-echo "🚀 Launching..."
-# RUST_LOG=debug ensures we see the read operations
-RUST_LOG=debug ./target/debug/magicfs "$MOUNT" "$WATCH"
+echo "🚀 Launching with Multi-Root: $WATCH_A, $WATCH_B"
+# Pass both paths separated by a comma
+RUST_LOG=info ./target/debug/magicfs "$MOUNT" "$WATCH_A,$WATCH_B"
