@@ -7,13 +7,14 @@ use crate::engine::request_embedding;
 pub struct Searcher;
 
 impl Searcher {
-    /// Perform a semantic search and update the InodeStore
-    /// GUARANTEE: This function MUST update InodeStore, even on failure.
-    /// If it fails, it writes an empty result set to break the EAGAIN loop.
     pub async fn perform_search(state: SharedState, query: String, expected_inode: u64) -> Result<()> {
+        
+        // --- FIX: Snowflake Query Prefix ---
+        // Snowflake Arctic models use "query: " to distinguish search intent
+        let formatted_query = format!("query: {}", query);
+
         // 1. Generate Embedding
-        // If this fails, we can't even search, so we return empty results immediately.
-        let query_embedding = match request_embedding(&state, query.clone()).await {
+        let query_embedding = match request_embedding(&state, formatted_query).await {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!("[Searcher] Embedding failed for '{}': {}", query, e);
@@ -43,7 +44,7 @@ impl Searcher {
                 let current_inode = state_guard.inode_store.get_or_create_inode(&query);
                 
                 if current_inode != expected_inode {
-                     tracing::warn!("[Searcher] Inode mismatch for '{}'. Expected: {}, Got: {}", query, expected_inode, current_inode);
+                      tracing::warn!("[Searcher] Inode mismatch for '{}'. Expected: {}, Got: {}", query, expected_inode, current_inode);
                 }
 
                 let count = results.len();

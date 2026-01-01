@@ -16,8 +16,8 @@ rusqlite = { version = "0.30", features = ["bundled", "chrono", "serde_json"] }
 sqlite-vec = "0.1"
 
 # Vector Embeddings
-# UPDATE: Bumped to version 4 to support BGE-M3
-fastembed = "4"
+# CRITICAL UPDATE: Bump to v5 to get Snowflake support
+fastembed = "5"
 
 # File Watching
 notify = "6.0"

@@ -15,8 +15,8 @@ trap restore_term EXIT INT TERM HUP
 # Configuration
 MOUNT_POINT="/tmp/magicfs-test-mount"
 WATCH_DIR="/tmp/magicfs-test-data"
-# --- UPDATED: M3 ISOLATION PATH ---
-DB_PATH="/tmp/.magicfs_m3/index.db"
+# --- UPDATED: NOMIC ISOLATION PATH ---
+DB_PATH="/tmp/.magicfs_arctic/index.db"
 BINARY="./target/debug/magicfs"
 LOG_FILE="tests/magicfs.log"
 
@@ -42,7 +42,7 @@ cleanup_environment() {
     # 3. Wipe Data
     sudo rm -f "$DB_PATH" 2>/dev/null
     sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" 2>/dev/null
-    # Ensure parent dir exists (since it's now .magicfs_m3)
+    # Ensure parent dir exists (since it's now .magicfs_nomic)
     mkdir -p "$(dirname "$DB_PATH")"
     
     # 4. Recreate Dirs
@@ -50,7 +50,7 @@ cleanup_environment() {
 }
 
 # 1. Build
-echo "[Build] Compiling MagicFS (BGE-M3 Edition)..."
+echo "[Build] Compiling MagicFS (Nomic Edition)..."
 cargo build --quiet || exit 1
 
 # 2. Run Rust Unit Tests (NEW STEP)

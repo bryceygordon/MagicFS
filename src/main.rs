@@ -11,12 +11,16 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    fmt().with_env_filter(EnvFilter::from_default_env()).init();
+// Default to "info" if RUST_LOG is not set
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,magicfs=debug"));
+
+    fmt().with_env_filter(env_filter).init();
 
     tracing::info!("=");
     tracing::info!("MagicFS Starting Up...");
-    tracing::info!("Branch: experiment/bge-m3");
-    tracing::info!("Model: BGE-M3 (1024 dims)");
+    tracing::info!("Branch: experiment/nomic-embed");
+    tracing::info!("Model: Nomic v1.5 (768 dims)");
     tracing::info!("=");
 
     let args: Vec<String> = env::args().collect();
@@ -62,8 +66,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- ISOLATION UPDATE: Separate DB directory for M3 experiments ---
-    let db_path = PathBuf::from("/tmp").join(".magicfs_m3").join("index.db");
+    // --- ISOLATION UPDATE: Separate DB directory for Nomic experiments ---
+    let db_path = PathBuf::from("/tmp").join(".magicfs_arctic").join("index.db");
     init_connection(&global_state, db_path.to_str().unwrap())?;
 
     let mut oracle = Oracle::new(Arc::clone(&global_state))?;

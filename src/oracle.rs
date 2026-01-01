@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, Semaphore};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use anyhow;
+// REMOVED: use anyhow; 
 use std::time::Duration;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -33,18 +33,13 @@ const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
 pub struct Oracle {
     pub state: SharedState,
-    pub runtime: Arc<tokio::runtime::Runtime>,
     pub task_handle: Option<JoinHandle<()>>,
 }
 
 impl Oracle {
     pub fn new(state: SharedState) -> Result<Self> {
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
-
         Ok(Self {
             state,
-            runtime: Arc::new(runtime),
             task_handle: None,
         })
     }
@@ -52,9 +47,12 @@ impl Oracle {
     pub fn start(&mut self) -> Result<()> {
         self.start_embedding_actor()?;
         let state = Arc::clone(&self.state);
-        let handle = self.runtime.spawn(async move {
+        
+        // Spawn directly onto the global runtime
+        let handle = tokio::spawn(async move {
             Oracle::run_event_loop(state).await;
         });
+        
         self.task_handle = Some(handle);
         tracing::info!("[Oracle] Started Orchestrator loop");
         Ok(())
@@ -70,13 +68,14 @@ impl Oracle {
         }
 
         std::thread::spawn(move || {
-            // --- UPGRADE: BGE-M3 ---
-            tracing::info!("[EmbeddingActor] Starting dedicated BGE-M3 model thread (High RAM Usage)...");
-            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGEM3));
+            // --- UPGRADE: Snowflake Arctic Embed XS ---
+            tracing::info!("[EmbeddingActor] Starting Snowflake Arctic XS (384 dims, SOTA)...");
+            // With fastembed v5, this enum variant is available.
+            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::SnowflakeArcticEmbedXS));
             
             let mut model = match model_result {
                 Ok(m) => {
-                    tracing::info!("[EmbeddingActor] BGE-M3 loaded successfully");
+                    tracing::info!("[EmbeddingActor] Snowflake Arctic XS loaded successfully");
                     m
                 },
                 Err(e) => {
@@ -91,6 +90,7 @@ impl Oracle {
                 let preview: String = content.chars().take(20).collect();
                 tracing::debug!("[EmbeddingActor] Embedding '{}'...", preview);
 
+                // No prefix needed for Snowflake Arctic XS (Zero-Shot)
                 let result = model.embed(vec![content], None)
                     .map(|mut res| res.remove(0))
                     .map_err(|e| MagicError::Embedding(format!("FastEmbed error: {}", e)));

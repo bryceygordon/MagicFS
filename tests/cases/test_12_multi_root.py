@@ -12,7 +12,8 @@ base_tmp = "/tmp/magicfs-test-data"
 dir_a = os.path.join(base_tmp, "root_a")
 dir_b = os.path.join(base_tmp, "root_b")
 mount_point = "/tmp/magicfs-test-mount"
-db_path = "/tmp/.magicfs/index.db"
+# --- FIX: Match the isolated DB path for this branch ---
+db_path = "/tmp/.magicfs_arctic/index.db"
 binary = "./target/debug/magicfs"
 log_file = "/tmp/magicfs_debug.log"
 
@@ -25,9 +26,9 @@ if os.path.exists(base_tmp):
     # This might contain root files if the daemon created anything, safer to sudo
     subprocess.run(["sudo", "rm", "-rf", base_tmp])
 
-if os.path.exists("/tmp/.magicfs"):
-    # This is definitely root owned by the daemon
-    subprocess.run(["sudo", "rm", "-rf", "/tmp/.magicfs"])
+# --- FIX: Cleanup the correct DB dir ---
+if os.path.exists("/tmp/.magicfs_arctic"):
+    subprocess.run(["sudo", "rm", "-rf", "/tmp/.magicfs_arctic"])
 
 os.makedirs(dir_a)
 os.makedirs(dir_b)
