@@ -1,73 +1,54 @@
+# MagicFS
 
----
+**MagicFS** is a semantic virtual filesystem that turns your chaos into an API. It mounts a FUSE drive where files are organized by *meaning*, not just location.
+
+## 🌟 Key Features
+
+* **Semantic Search**: `ls ~/MagicFS/search/"tax invoice"` instantly lists relevant files.
+* **Mirror Navigation**: Browse your source directories normally via `~/MagicFS/mirror/`.
+* **Universal Reader & Writer**: Open, edit, and save files directly from the virtual mount. MagicFS passes reads/writes through to the real file on disk.
+* **Multi-Root Monitoring**: Watch `~/Documents` and `~/Projects` simultaneously.
+* **Privacy First**: All embeddings are calculated locally. No data leaves your machine.
 
 ## 📦 Installation (Arch Linux)
 
-MagicFS provides a native Arch Linux package via `PKGBUILD` and a setup wizard to handle configuration and persistence.
-
-### 1. Build & Install Package
-
-This compiles the project from source and installs the binary, service templates, and management tools to your system.
-
 ```bash
-# Navigate to the packaging directory
 cd pkg
-
-# Build and install using makepkg
 makepkg -si
-
 ```
 
-### 2. Configure & Start
+## 🚀 Usage
 
-Once installed, use the **MagicFS Manager** to set your mount point, watch directory, and enable the background service.
+### 1. Start the Daemon
+You can run it as a systemd service or manually.
 
 ```bash
-# Run the interactive setup wizard
-magicfs-manager setup
-
+# Manual Run (Multi-Root)
+magicfs ~/MagicFS ~/Documents,~/Pictures
 ```
 
-The wizard will:
+### 2. Navigate
+MagicFS exposes two primary interfaces:
 
-1. Ask where you want to mount MagicFS (Default: `~/MagicFS`).
-2. Ask which directory to monitor (Default: `~/Documents`).
-3. Generate a persistent Systemd configuration.
-4. Start the daemon automatically on login.
+1.  **Search Mode** (`/search`):
+    * Navigate to `/search/<query>` to trigger a semantic search.
+    * Example: `cd "/home/user/MagicFS/search/beef recipes"`
+    * Result: Files are listed by relevance (e.g., `0.95_steak.txt`).
 
-To verify it's working:
+2.  **Mirror Mode** (`/mirror`):
+    * Browse your watched directories as a unified tree.
+    * Example: `/home/user/MagicFS/mirror/Documents/` maps to `~/Documents`.
 
-```bash
-# Check the service status
-systemctl --user status magicfs
+### 3. Edit
+You can open any file in MagicFS with your favorite editor (Micro, Vim, VS Code).
+* **Read**: File content is streamed from the real disk (Passthrough).
+* **Write**: Saving a file in MagicFS updates the real file on your disk instantly.
 
-# View live logs
-journalctl --user -u magicfs -f
+## 🛠️ Configuration
 
-```
-
----
-
-## 🗑️ Uninstallation
-
-To completely remove MagicFS from your system, follow this two-step process to ensure no configuration files or zombie processes are left behind.
-
-### 1. Stop Service & Remove Config
-
-Use the manager to stop the daemon and remove user-specific configurations.
+Configuration is handled via `~/.config/magicfs/daemon.conf` or CLI arguments.
 
 ```bash
-magicfs-manager remove
-
-```
-
-*You will be asked if you want to delete the local database index (`~/.magicfs`). Select 'Y' for a complete scrub.*
-
-### 2. Uninstall Package
-
-Remove the binary and system files using pacman.
-
-```bash
-sudo pacman -Rns magicfs-git
-
+MAGICFS_MOUNT="/home/user/MagicFS"
+MAGICFS_WATCH="/home/user/Documents,/home/user/Obsidian"
 ```

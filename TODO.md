@@ -1,24 +1,26 @@
 # MagicFS Roadmap
 
-## 🚀 Priority: Phase 7 - The Universal Reader & Navigator
-- [ ] **Implement Passthrough Reading** (Immediate Priority)
-    - [ ] Replace `read()` in `main.rs` to stream real file bytes.
-    - [ ] Enable opening/editing files directly from virtual paths.
-- [ ] **Multi-Directory Monitoring**
-    - [ ] Update `Config` to accept a list of directories (e.g., `vec![PathBuf]`).
-    - [ ] Update `Librarian` to watch multiple roots.
-- [ ] **"Mirror Mode" (Navigation)**
-    - [ ] Create a `/root` (or similar) folder inside MagicFS.
-    - [ ] Map watched directories into this folder so they can be browsed normally.
+## 🚀 Priority: Phase 10 - AI & Content Intelligence
+- [ ] **AI Model Upgrade**
+    - [ ] Evaluate `BGE-M3` vs `Nomic-Embed` for better semantic resolution.
+    - [ ] Update `oracle.rs` to load the larger model.
+- [ ] **Context Injection**
+    - [ ] Modify `indexer.rs` to prepend `Filename: [Name]\n` to every text chunk.
+    - [ ] Fix "Semantic Dilution" where generic chunks lose context.
+- [ ] **Search Scoring Improvements**
+    - [ ] Implement Hybrid Scoring (Vector + Keyword).
+    - [ ] Add SQL boost for filenames matching the query (`abs_path LIKE '%query%'`).
 - [ ] **Binary File Support**
-    - [ ] Add `pdf-extract` for PDFs.
-    - [ ] Add `docx-rs` for Word docs.
-
-## Phase 8: Hardening
-- [ ] Robust error handling for file permissions.
-- [ ] Integration tests for the full search loop.
+    - [ ] Integrate `pdf-extract` for PDFs.
+    - [ ] Integrate `docx-rs` for Word docs.
 
 ## Archive (Completed)
-- [x] Phase 6: Arch Linux Packaging
-- [x] Systemd Service (Nuked for Dev Mode)
-- [x] "Nuclear" Cleanup Script (`dev.sh`)
+- [x] **Phase 7: Passthrough Read/Write**
+    - [x] Implement `read()` with `FileExt::read_at`.
+    - [x] Implement `write()` and `setattr` for saving changes.
+- [x] **Phase 8: Multi-Directory**
+    - [x] Update CLI to accept list of paths.
+    - [x] Update Librarian to watch multiple roots.
+- [x] **Phase 9: Mirror Mode**
+    - [x] Implement `/mirror` directory.
+    - [x] Implement Inode mapping for browsing.

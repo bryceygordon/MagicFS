@@ -1,19 +1,30 @@
-# Session Handover - Jan 1, 2026
+# Session Handover - Jan 1, 2026 (Session 2)
 
-## 🛑 Current Status: Dev Mode
-- **Run Method:** `./dev.sh` (Auto-cleans, builds, and mounts).
-- **Service:** Systemd service has been **deleted** to prevent conflicts.
-- **State:** MagicFS mounts successfully at `~/MagicFS`. Search works, but file reading returns debug text.
+## 🛑 Current Status
+- **System**: Stable. All tests passing (`tests/run_suite.sh`).
+- **Features**: Read/Write/Search/Mirror/Multi-Root are LIVE.
+- **Environment**: `./dev.sh` mounts `~/me` and `~/sync/vault`.
+
+## 🧠 Context: The "Magic" Deficit
+While the *plumbing* is perfect, the *intelligence* needs work.
+1.  **Semantic Drift**: Searching "Beef" ranks "Chicken" too high (Model lacks nuance).
+2.  **Title Blindness**: Filenames aren't weighted heavily enough.
 
 ## 🎯 Next Session Goals
-1. **Implement File Streaming:**
-   - Modify `src/main.rs` to allow `read()` to pass through to the real underlying file.
-   - *Goal:* `micro ~/MagicFS/search/query/result.md` works perfectly.
-   
-2. **Multi-Directory & Navigation:**
-   - Update config to support watching multiple paths.
-   - Implement a "Mirror" feature to browse these paths via MagicFS.
+**Theme: "Making it Smart"**
+
+1.  **Upgrade AI Model**:
+    * Switch from `BGESmallENV15` (Tiny) to **`BGE-M3`** or **`Nomic-Embed`** (State of the Art).
+    * *Task*: Update `oracle.rs` and `Cargo.toml`.
+
+2.  **Context Injection**:
+    * Modify `src/storage/text_extraction.rs` or `indexer.rs`.
+    * *Logic*: Prepend `File: {filename}\n` to every chunk before embedding.
+
+3.  **Hybrid Scoring**:
+    * Modify `src/storage/repository.rs`.
+    * *Logic*: `SELECT ..., (1.0 - distance) + (CASE WHEN path LIKE %q% THEN 0.2 ELSE 0 END) as score`.
 
 ## 📝 Commands
-- **Start:** `./dev.sh`
-- **Test:** `ls ~/MagicFS/search/"my query"`
+- **Start**: `./dev.sh` (Auto-cleans DB, builds, mounts with sudo).
+- **Test Suite**: `tests/run_suite.sh`
