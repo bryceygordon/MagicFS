@@ -70,11 +70,13 @@ impl Oracle {
         }
 
         std::thread::spawn(move || {
-            tracing::info!("[EmbeddingActor] Starting dedicated model thread...");
-            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15));
+            // --- UPGRADE: BGE-M3 ---
+            tracing::info!("[EmbeddingActor] Starting dedicated BGE-M3 model thread (High RAM Usage)...");
+            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGEM3));
+            
             let mut model = match model_result {
                 Ok(m) => {
-                    tracing::info!("[EmbeddingActor] Model loaded successfully");
+                    tracing::info!("[EmbeddingActor] BGE-M3 loaded successfully");
                     m
                 },
                 Err(e) => {

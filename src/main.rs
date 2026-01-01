@@ -15,7 +15,8 @@ async fn main() -> Result<()> {
 
     tracing::info!("=");
     tracing::info!("MagicFS Starting Up...");
-    tracing::info!("Phase 9: Mirror Mode");
+    tracing::info!("Branch: experiment/bge-m3");
+    tracing::info!("Model: BGE-M3 (1024 dims)");
     tracing::info!("=");
 
     let args: Vec<String> = env::args().collect();
@@ -61,7 +62,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    let db_path = PathBuf::from("/tmp").join(".magicfs").join("index.db");
+    // --- ISOLATION UPDATE: Separate DB directory for M3 experiments ---
+    let db_path = PathBuf::from("/tmp").join(".magicfs_m3").join("index.db");
     init_connection(&global_state, db_path.to_str().unwrap())?;
 
     let mut oracle = Oracle::new(Arc::clone(&global_state))?;

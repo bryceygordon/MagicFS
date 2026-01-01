@@ -35,13 +35,14 @@ impl<'a> Repository<'a> {
         ).unwrap_or(0);
 
         if has_vec_index == 0 {
+             // --- UPGRADE: BGE-M3 (1024 Dimensions) ---
              match self.conn.execute_batch(r#"
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                     file_id INTEGER,
-                    embedding float[384] distance_metric=cosine
+                    embedding float[1024] distance_metric=cosine
                 )
             "#) {
-                Ok(_) => tracing::info!("[Repository] Created vec_index table"),
+                Ok(_) => tracing::info!("[Repository] Created vec_index table (1024 dim)"),
                 Err(e) => tracing::warn!("[Repository] Failed to create vec_index: {}", e),
             }
         }
@@ -70,7 +71,7 @@ impl<'a> Repository<'a> {
 
     /// Streaming method: Process all files using a callback closure.
     /// This prevents loading the entire database into memory (OOM protection).
-    pub fn scan_all_files<F>(&self, mut callback: F) -> Result<()> 
+    pub fn scan_all_files<F>(&self, mut callback: F) 
     where F: FnMut(u64, String) -> Result<()> 
     {
         let mut stmt = self.conn.prepare("SELECT file_id, abs_path FROM file_registry")?;
