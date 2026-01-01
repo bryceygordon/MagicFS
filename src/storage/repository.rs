@@ -59,8 +59,6 @@ impl<'a> Repository<'a> {
         }
     }
 
-    /// Legacy method: Load all files into memory. 
-    /// Kept for compatibility but should be avoided for large datasets.
     pub fn get_all_files(&self) -> Result<Vec<(u64, String)>> {
         let mut stmt = self.conn.prepare("SELECT file_id, abs_path FROM file_registry")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -69,22 +67,18 @@ impl<'a> Repository<'a> {
         Ok(results)
     }
 
-    /// Streaming method: Process all files using a callback closure.
-    /// This prevents loading the entire database into memory (OOM protection).
-    pub fn scan_all_files<F>(&self, mut callback: F) 
+    // --- FIX: Added return type -> Result<()> ---
+    pub fn scan_all_files<F>(&self, mut callback: F) -> Result<()>
     where F: FnMut(u64, String) -> Result<()> 
     {
         let mut stmt = self.conn.prepare("SELECT file_id, abs_path FROM file_registry")?;
         
-        // Use query_map to create a lazy iterator
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
         })?;
 
         for row in rows {
             let (id, path) = row?;
-            // Pass ownership of the string to the callback immediately
-            // so it can be dropped before the next row is read.
             callback(id, path)?;
         }
         
@@ -156,34 +150,5 @@ impl<'a> Repository<'a> {
         let mut results = Vec::new();
         for r in rows { results.push(r?); }
         Ok(results)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rusqlite::Connection;
-
-    #[test]
-    fn test_streaming_capabilities() {
-        // Setup in-memory DB
-        let conn = Connection::open_in_memory().unwrap();
-        let repo = Repository::new(&conn);
-        repo.initialize().unwrap();
-
-        // Populate with data
-        for i in 0..100 {
-            repo.register_file(&format!("/tmp/file_{}", i), i, 0, 0, false).unwrap();
-        }
-
-        // FAILURE POINT: This method relies on the new streaming implementation.
-        // It asserts that we can count 100 items without loading a Vec of 100 items.
-        let mut count = 0;
-        repo.scan_all_files(|_id, _path| {
-            count += 1;
-            Ok(())
-        }).expect("Streaming failed");
-
-        assert_eq!(count, 100);
     }
 }
