@@ -2,15 +2,15 @@
 use crate::state::SharedState;
 use crate::error::{Result, MagicError};
 use crate::storage::Repository;
-use crate::engine::request_embedding;
+use crate::engine::request_embedding_batch;
 
 pub struct Searcher;
 
 impl Searcher {
     pub async fn perform_search(state: SharedState, query: String, expected_inode: u64) -> Result<()> {
-        // 1. Generate Embedding
-        // is_query = true (CRITICAL: Tells Oracle to apply "search_query: " prefix)
-        let query_embedding = match request_embedding(&state, query.clone(), true).await {
+        // 1. Generate Embedding (Batch of 1)
+        // is_query = true
+        let mut embeddings = match request_embedding_batch(&state, vec![query.clone()], true).await {
             Ok(e) => e,
             Err(e) => {
                 tracing::error!("[Searcher] Embedding failed for '{}': {}", query, e);
@@ -19,14 +19,20 @@ impl Searcher {
             }
         };
 
+        if embeddings.is_empty() {
+             return Err(MagicError::Embedding("No embedding returned".into()));
+        }
+        let query_embedding = embeddings.remove(0);
+
         // 2. Search Database (Blocking)
         let state_for_search = state.clone();
         let results_result = tokio::task::block_in_place(move || {
             let state_guard = state_for_search.read()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock()
+            // MUTABLE LOCK ACQUISITION
+            let mut conn_lock = state_guard.db_connection.lock()
                 .map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_ref = conn_lock.as_ref()
+            let conn_ref = conn_lock.as_mut()
                 .ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
             
             let repo = Repository::new(conn_ref);
@@ -40,7 +46,7 @@ impl Searcher {
                 let current_inode = state_guard.inode_store.get_or_create_inode(&query);
                 
                 if current_inode != expected_inode {
-                      tracing::warn!("[Searcher] Inode mismatch for '{}'. Expected: {}, Got: {}", query, expected_inode, current_inode);
+                       tracing::warn!("[Searcher] Inode mismatch for '{}'. Expected: {}, Got: {}", query, expected_inode, current_inode);
                 }
 
                 let count = results.len();

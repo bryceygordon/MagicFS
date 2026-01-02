@@ -39,7 +39,7 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     std::fs::create_dir_all(db_dir)
         .map_err(crate::error::MagicError::Io)?;
 
-    let conn = Connection::open(db_path)
+    let mut conn = Connection::open(db_path)
         .map_err(crate::error::MagicError::Database)?;
 
     // Performance & Concurrency Pragmas
@@ -49,12 +49,11 @@ pub fn init_connection(state: &SharedState, db_path: &str) -> crate::error::Resu
     conn.pragma_update(None, "foreign_keys", "ON")?;
     
     // CRITICAL FIX: Set busy_timeout to 5000ms.
-    // This prevents "Database Busy" errors when Indexer and Searcher collide.
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
     // Use Repository to init schema
-    // We create a temporary Repository just for this init step
-    let repo = Repository::new(&conn);
+    // UPDATED: Pass &mut conn
+    let repo = Repository::new(&mut conn);
     repo.initialize()?;
 
     // Store in global state

@@ -2,7 +2,7 @@
 use crate::state::SharedState;
 use crate::error::{Result, MagicError};
 use crate::storage::Repository;
-use crate::engine::request_embedding;
+use crate::engine::request_embedding_batch;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::io;
@@ -14,8 +14,8 @@ impl Indexer {
     /// 1. Extract text (with retries)
     /// 2. Chunk text
     /// 3. Register file in DB
-    /// 4. Generate embeddings
-    /// 5. Insert embeddings
+    /// 4. Generate embeddings (BATCHED)
+    /// 5. Insert embeddings (TRANSACTIONAL)
     pub async fn index_file(state: SharedState, file_path: String) -> Result<()> {
         tracing::info!("[Indexer] Processing: {}", file_path);
         
@@ -48,8 +48,11 @@ impl Indexer {
         // 3. Register File & Clean Old Data
         let (file_id, _inode) = {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
+            // Acquire mutable lock for registration
+            let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
+            
+            // [FIXED] Removed unused mut here
             let repo = Repository::new(conn);
 
             // Mock inode logic
@@ -67,31 +70,33 @@ impl Indexer {
             (fid, inode)
         };
 
-        // 4. Generate & Insert Embeddings
-        for chunk in chunks {
-            // is_query = false (We are indexing DOCUMENTS)
-            let embedding = request_embedding(&state, chunk, false).await?;
-            
+        // 4. Generate Embeddings (BATCHED)
+        // is_query = false (We are indexing DOCUMENTS)
+        // This sends ALL chunks to the GPU/CPU in one go.
+        let embeddings_batch = request_embedding_batch(&state, chunks, false).await?;
+        
+        // 5. Insert Embeddings (TRANSACTIONAL)
+        {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            let repo = Repository::new(conn);
+            let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            // We need a mutable connection for transactions
+            let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
+            
+            // 'repo' needs to be mut because insert_embeddings_batch is &mut self
+            let mut repo = Repository::new(conn);
 
-            if let Err(e) = repo.insert_embedding(file_id, &embedding) {
-                tracing::warn!("[Indexer] Failed to insert chunk: {}", e);
+            if let Err(e) = repo.insert_embeddings_batch(file_id, embeddings_batch) {
+                tracing::warn!("[Indexer] Failed to insert batch: {}", e);
             }
         }
 
-        // 5. Invalidate Caches
+        // 6. Invalidate Caches
         Self::invalidate_cache(state)?;
         tracing::info!("[Indexer] Indexed {} (ID: {})", file_path, file_id);
         Ok(())
     }
 
     pub async fn remove_file(state: SharedState, file_path: String) -> Result<()> {
-        // ====================================================================
-        // THE ARBITRATOR (Reality Check)
-        // ====================================================================
         if std::path::Path::new(&file_path).exists() {
             tracing::warn!("[Arbitrator] Delete request for '{}' rejected - file exists on disk. Re-indexing instead.", file_path);
             return Self::index_file(state, file_path).await;
@@ -99,8 +104,9 @@ impl Indexer {
 
         {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            let conn = conn_lock.as_ref().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
+            // Acquire mutable lock for deletion
+            let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+            let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
             let repo = Repository::new(conn);
 
             if let Some(record) = repo.get_file_by_path(&file_path)? {

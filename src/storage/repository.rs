@@ -6,11 +6,11 @@ use bytemuck;
 use std::path::Path;
 
 pub struct Repository<'a> {
-    conn: &'a Connection,
+    conn: &'a mut Connection,
 }
 
 impl<'a> Repository<'a> {
-    pub fn new(conn: &'a Connection) -> Self {
+    pub fn new(conn: &'a mut Connection) -> Self {
         Self { conn }
     }
 
@@ -35,7 +35,7 @@ impl<'a> Repository<'a> {
         ).unwrap_or(0);
 
         if has_vec_index == 0 {
-             // --- UPGRADE: Snowflake Arctic Medium (768 Dimensions) ---
+             // Snowflake Arctic Medium (768 Dimensions) / Nomic v1.5
              match self.conn.execute_batch(r#"
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                     file_id INTEGER,
@@ -123,6 +123,21 @@ impl<'a> Repository<'a> {
 
     pub fn delete_embeddings_for_file(&self, file_id: u64) -> Result<()> {
         self.conn.execute("DELETE FROM vec_index WHERE file_id = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    // NEW: Batch Insertion for High Performance
+    // Requires &mut self (and thus &mut Connection)
+    pub fn insert_embeddings_batch(&mut self, file_id: u64, embeddings: Vec<Vec<f32>>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO vec_index (file_id, embedding) VALUES (?1, ?2)")?;
+            for embedding in embeddings {
+                let bytes: Vec<u8> = bytemuck::cast_slice(&embedding).to_vec();
+                stmt.execute(params![file_id, bytes])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

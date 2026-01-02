@@ -18,15 +18,10 @@ use std::collections::HashSet;
 const MAX_CONCURRENT_INDEXERS: usize = 2;
 const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
-/// Helper: Checks if 'needle' is a prefix of any string in 'haystack'.
-/// Used for debouncing "Typewriter" searches (e.g. dropping "app" if "apple" is pending).
-fn is_prefix_of_any(needle: &str, haystack: &[String]) -> bool {
-    for other in haystack {
-        if other != needle && other.starts_with(needle) {
-            return true;
-        }
-    }
-    false
+/// Helper: Checks if two strings are "related" (one is a prefix of the other).
+/// Returns true if `a` starts with `b` OR `b` starts with `a`.
+fn are_related_queries(a: &str, b: &str) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 pub struct Oracle {
@@ -82,24 +77,18 @@ impl Oracle {
             };
 
             while let Some(request) = rx.blocking_recv() {
-                // Deconstruct request to get flag
                 let EmbeddingRequest { content, is_query, respond_to } = request;
 
-                let preview: String = content.chars().take(20).collect();
+                let mut final_content = Vec::with_capacity(content.len());
+                for text in content {
+                    if is_query {
+                        final_content.push(format!("search_query: {}", text));
+                    } else {
+                        final_content.push(format!("search_document: {}", text));
+                    }
+                }
 
-                // --- THE PREFIX FIX (Asymmetric Search) ---
-                let final_content = if is_query {
-                    // Query Prefix
-                    tracing::debug!("[EmbeddingActor] Prepending 'search_query: ' to '{}'...", preview);
-                    format!("search_query: {}", content)
-                } else {
-                    // Document Prefix
-                    // Nomic v1.5 *requires* this for maximum accuracy
-                    format!("search_document: {}", content)
-                };
-
-                let result = model.embed(vec![final_content], None)
-                    .map(|mut res| res.remove(0))
+                let result = model.embed(final_content, None)
                     .map_err(|e| MagicError::Embedding(format!("FastEmbed error: {}", e)));
 
                 if let Err(_) = respond_to.send(result) {
@@ -236,7 +225,7 @@ impl Oracle {
 
             // PRIORITY 2: SEARCHING
             
-            // --- NEW: Accumulation Delay (Debouncing) ---
+            // --- Accumulation Delay (Debouncing) ---
             let has_candidates = {
                 let state_guard = state.read().unwrap();
                 let active = state_guard.inode_store.active_queries();
@@ -245,12 +234,11 @@ impl Oracle {
 
             if has_candidates {
                 // Wait 20ms to allow "Typewriter Bursts" to accumulate in the FUSE buffer.
-                // 20ms is roughly 1 frame at 60fps - unnoticeable to humans but 
-                // plenty of time for machine input to stack up.
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
 
             // Step A: Gather candidates
+            // IMPORTANT: We need them ordered by Recency.
             let candidates: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let inode_store = &state_guard.inode_store;
@@ -266,26 +254,39 @@ impl Oracle {
                     .collect()
             };
 
-            // Step B: Prefix Suppression (Debouncing)
-            let pending_strings: Vec<String> = candidates.iter().map(|(q, _)| q.clone()).collect();
+            if !candidates.is_empty() {
+                let raw_list: Vec<String> = candidates.iter().map(|(q, _)| q.clone()).collect();
+                tracing::info!("[Oracle] 📥 Batch Inbox: {:?}", raw_list);
+            }
+
+            // [FIXED] Removed .reverse().
+            // We suspect iter() returns [MRU ... LRU] or [LRU ... MRU]?
+            // Logging "Raw Order" above will confirm this definitively.
+            // If Raw Order is [mag, ..., magicfs], then MRU is first. 
+            // In that case, iterating forward without reverse is correct.
+
+            // Step B: Time-Aware Debouncing (Latest Wins)
             
             let mut queries_to_process = Vec::new();
+            let mut pending_accepted: Vec<String> = Vec::new();
             let mut suppressed_count = 0;
 
             for (query, inode) in candidates.into_iter() {
-                if is_prefix_of_any(&query, &pending_strings) {
-                    // Important: Mark suppressed queries as processed so they don't 
-                    // re-enter the queue in the next loop cycle.
-                    tracing::debug!("[Oracle] Debounced prefix: '{}'", query);
+                // Check if this query is "related" to any query we have ALREADY accepted (which is NEWER).
+                let is_stale = pending_accepted.iter().any(|accepted| are_related_queries(&query, accepted));
+
+                if is_stale {
+                    tracing::debug!("[Oracle] Debounced stale query: '{}'", query);
                     processed_queries.put(query.clone(), ());
                     suppressed_count += 1;
                 } else {
-                    queries_to_process.push((query, inode));
+                    queries_to_process.push((query.clone(), inode));
+                    pending_accepted.push(query);
                 }
             }
             
             if suppressed_count > 0 {
-                tracing::debug!("[Oracle] Debounced {} intermediate queries.", suppressed_count);
+                tracing::info!("[Oracle] Debounced {} intermediate queries.", suppressed_count);
             }
 
             // Limit concurrency

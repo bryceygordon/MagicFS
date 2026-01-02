@@ -23,8 +23,8 @@ impl IgnoreManager {
         // DEFAULT IGNORES
         new_rules.insert(".magicfsignore".to_string());
         new_rules.insert(".magicfs".to_string());
-        new_rules.insert(".magic".to_string()); // Ignored to hide trigger files from SEARCH
-        new_rules.insert(".git".to_string());   // Standard noise
+        new_rules.insert(".magic".to_string()); 
+        new_rules.insert(".git".to_string());   
         
         if let Ok(content) = fs::read_to_string(&ignore_file) {
             for line in content.lines() {
@@ -129,8 +129,9 @@ impl Librarian {
 
     fn purge_orphaned_records(state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         let state_guard = state.read().unwrap();
-        let conn_lock = state_guard.db_connection.lock().unwrap();
-        let conn = conn_lock.as_ref().unwrap();
+        // MUTABLE LOCK
+        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+        let conn = conn_lock.as_mut().unwrap();
         let repo = crate::storage::Repository::new(conn);
 
         let mut deletion_queue: Vec<u64> = Vec::new();
@@ -189,11 +190,12 @@ impl Librarian {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
                     let fs_size = path.metadata().ok().map(|m| m.len()).unwrap_or(0);
                     
-                    // PERFORMANCE FIX: Lock DB only for the specific check, not the whole walk
+                    // PERFORMANCE FIX: Lock DB only for the specific check
                     let should_index = {
                         let state_guard = state.read().unwrap();
-                        let conn_lock = state_guard.db_connection.lock().unwrap();
-                        let conn = conn_lock.as_ref().unwrap();
+                        // MUTABLE LOCK
+                        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+                        let conn = conn_lock.as_mut().unwrap();
                         let repo = crate::storage::Repository::new(conn);
                         
                         match repo.get_file_metadata(&path_str) {
@@ -216,11 +218,8 @@ impl Librarian {
     fn handle_file_event(event: &std::result::Result<Event, notify::Error>, state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
         if let Ok(event) = event {
             
-            // --------------------------------------------------------
-            // 🆕 MANUAL REFRESH TRIGGER (Robust & BEFORE Ignore Check)
-            // --------------------------------------------------------
+            // MANUAL REFRESH TRIGGER
             for path in &event.paths {
-                // Check if filename is 'refresh' and parent is '.magic'
                 if let Some(file_name) = path.file_name() {
                     if file_name == "refresh" {
                         if let Some(parent) = path.parent() {

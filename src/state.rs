@@ -9,12 +9,14 @@ use crate::error::MagicError;
 use crate::core::inode_store::InodeStore;
 
 // Type alias for embedding results to keep signatures clean
-type EmbeddingResult = std::result::Result<Vec<f32>, MagicError>;
+// NOW RETURNS A VECTOR OF VECTORS (Batch Result)
+type EmbeddingResult = std::result::Result<Vec<Vec<f32>>, MagicError>;
 
 /// Request sent to the Embedding Actor
 pub struct EmbeddingRequest {
-    pub content: String,
-    // NEW: Critical flag for Asymmetric Retrieval (Query vs Doc)
+    // UPDATED: Supports batch processing
+    pub content: Vec<String>,
+    // Critical flag for Asymmetric Retrieval (Query vs Doc)
     pub is_query: bool,
     pub respond_to: oneshot::Sender<EmbeddingResult>,
 }
@@ -40,7 +42,7 @@ pub struct GlobalState {
     /// Manual Override Signal (Atomic Flag)
     pub refresh_signal: Arc<AtomicBool>,
 
-    /// NEW: List of watched root directories (for Mirror Mode)
+    /// List of watched root directories (for Mirror Mode)
     pub watch_paths: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
