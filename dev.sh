@@ -6,8 +6,17 @@ set -e
 MOUNT="$HOME/MagicFS"
 WATCH_A="$HOME/me"
 WATCH_B="$HOME/sync/vault"
-# --- UPDATED: NOMIC V1.5 ISOLATION PATH ---
+# --- UPDATED: NOMIC ISOLATION PATH ---
 DB_DIR="/tmp/.magicfs_nomic"
+
+# Check for arguments
+KEEP_DB=false
+for arg in "$@"; do
+    if [ "$arg" == "--keep-db" ]; then
+        KEEP_DB=true
+        echo "💾 Database persistence enabled."
+    fi
+done
 
 echo "🔑 Authorizing sudo..."
 sudo -v
@@ -17,12 +26,11 @@ echo "☢️  Cleanup Sequence Initiated..."
 # 1. Kill processes
 sudo pkill -x magicfs || true
 
-# 2. Unmount Loop (Wait for it to actually detach)
+# 2. Unmount Loop
 if mountpoint -q "$MOUNT" 2>/dev/null || grep -qs "$MOUNT" /proc/mounts; then
     echo "    🔻 Unmounting..."
     sudo umount -l "$MOUNT"
     
-    # Wait until it is NO LONGER a mountpoint
     MAX_RETRIES=10
     COUNT=0
     while mountpoint -q "$MOUNT" 2>/dev/null; do
@@ -38,23 +46,21 @@ fi
 # 3. Delete mount directory
 if [ -d "$MOUNT" ]; then
     echo "    🗑️  Removing old mount directory..."
-    if ! sudo rm -rf "$MOUNT"; then
-          echo "    ❌ FATAL: 'rm' failed. The mount is still stuck."
-          ls -ld "$MOUNT"
-          exit 1
-    fi
+    sudo rm -rf "$MOUNT"
 fi
 
-# 4. Delete Database (Fixes Permission Error from Tests)
-if [ -d "$DB_DIR" ]; then
-    echo "    🗄️  Wiping old database ($DB_DIR)..."
-    sudo rm -rf "$DB_DIR"
+# 4. Delete Database (Conditional)
+if [ "$KEEP_DB" = false ]; then
+    if [ -d "$DB_DIR" ]; then
+        echo "    🗄️  Wiping old database ($DB_DIR)..."
+        sudo rm -rf "$DB_DIR"
+    fi
+else
+    echo "    ⏩ Skipping database wipe (--keep-db)."
 fi
 
 # 5. Recreate Dirs
 echo "    ✨ Creating directories..."
-# We create the mount point as the normal user so the folder belongs to you 
-# before the mount overlays it.
 mkdir -p "$MOUNT"
 mkdir -p "$WATCH_A"
 mkdir -p "$WATCH_B"
@@ -66,7 +72,5 @@ cargo build
 
 echo "🚀 Launching with Multi-Root: $WATCH_A, $WATCH_B"
 
-# FIX: Use sudo -E to preserve RUST_LOG and run as root.
-# This ensures 'AllowOther' works correctly, allowing you to browse
-# the filesystem without permission prompts.
+# FIX: Use sudo -E to preserve RUST_LOG
 sudo -E ./target/debug/magicfs "$MOUNT" "$WATCH_A,$WATCH_B"
