@@ -15,8 +15,8 @@ trap restore_term EXIT INT TERM HUP
 # Configuration
 MOUNT_POINT="/tmp/magicfs-test-mount"
 WATCH_DIR="/tmp/magicfs-test-data"
-# --- UPDATED: MATCHING MAIN.RS ISOLATION PATH ---
-DB_PATH="/tmp/.magicfs_snowflake_m/index.db"
+# --- UPDATED: MATCHING MAIN.RS ISOLATION PATH (Nomic v1.5) ---
+DB_PATH="/tmp/.magicfs_nomic/index.db"
 BINARY="./target/debug/magicfs"
 LOG_FILE="tests/magicfs.log"
 
@@ -53,7 +53,7 @@ cleanup_environment() {
 }
 
 # 1. Build
-echo "[Build] Compiling MagicFS (Snowflake-M Edition)..."
+echo "[Build] Compiling MagicFS (Nomic Edition)..."
 cargo build --quiet || exit 1
 
 # 2. Run Rust Unit Tests
@@ -78,7 +78,7 @@ for test_file in $(ls tests/cases/*.py | sort); do
     sudo nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
     
     # Wait for daemon to stabilize (HollowDrive ready)
-    # Snowflake M might take a moment to download on first run
+    # Nomic might take a moment to download on first run
     sleep 3
     
     # C. Run Test

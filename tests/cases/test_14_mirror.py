@@ -11,8 +11,8 @@ base_tmp = "/tmp/magicfs-test-data"
 root_dir = os.path.join(base_tmp, "my_docs")
 sub_dir = os.path.join(root_dir, "projects")
 mount_point = "/tmp/magicfs-test-mount"
-# UPDATED PATH
-db_path = "/tmp/.magicfs_snowflake_m/index.db"
+# UPDATED PATH: Matched to main.rs (Nomic)
+db_path = "/tmp/.magicfs_nomic/index.db"
 binary = "./target/debug/magicfs"
 log_file = "/tmp/magicfs_debug.log"
 
@@ -22,8 +22,8 @@ if os.path.exists(mount_point):
 if os.path.exists(base_tmp):
     subprocess.run(["sudo", "rm", "-rf", base_tmp])
 # CLEANUP CORRECT DB DIR
-if os.path.exists("/tmp/.magicfs_snowflake_m"):
-    subprocess.run(["sudo", "rm", "-rf", "/tmp/.magicfs_snowflake_m"])
+if os.path.exists("/tmp/.magicfs_nomic"):
+    subprocess.run(["sudo", "rm", "-rf", "/tmp/.magicfs_nomic"])
 
 os.makedirs(sub_dir)
 os.makedirs(mount_point, exist_ok=True)

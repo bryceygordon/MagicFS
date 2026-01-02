@@ -32,10 +32,10 @@ for i in range(30):
                     try:
                         score = float(score_str)
                         print(f"✅ Found file with score: {score}")
-                        
+
                         # Threshold logic:
-                        # UPDATED: 0.50 is the baseline for Snowflake Medium (reduced chunking helps this)
-                        if score > 0.50:
+                        # UPDATED: 0.35 for Nomic v1.5 (more accurate, appropriately penalizes noisy files)
+                        if score > 0.35:
                             print("✅ Score indicates strong semantic match (Chunking working).")
                             found = True
                             break

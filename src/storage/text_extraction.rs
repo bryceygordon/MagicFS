@@ -24,7 +24,6 @@ const BINARY_CHECK_BUFFER_SIZE: usize = 8192;
 // It is large enough to contain a complete sentence/thought, but small enough
 // to be vector-specific (high relevance for "Needle in Haystack").
 const TARGET_CHUNK_SIZE: usize = 300; 
-const CHUNK_OVERLAP: usize = 50; 
 
 /// Extract text content from a file
 pub fn extract_text_from_file(path: &Path) -> Result<String> {
@@ -88,7 +87,7 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
 /// Structure-Aware Chunking (The Elegant Solution)
 /// 
 /// Instead of slicing bytes, we accumulate logical units (paragraphs, lines, words).
-/// This guarantees we never cut a word in half (`Extr-` ... `-act`) and preserves
+/// This guarantees we never cut a word in half (`Extr-` + `-act`) and preserves
 /// semantic boundaries for the AI model.
 pub fn chunk_text(text: &str) -> Vec<String> {
     if text.trim().is_empty() {
