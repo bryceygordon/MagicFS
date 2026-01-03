@@ -1,24 +1,38 @@
 // FILE: src/state.rs
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex, Condvar};
 use std::sync::atomic::{AtomicUsize, AtomicBool};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use crate::error::MagicError;
 use crate::core::inode_store::InodeStore;
+use std::collections::HashMap;
 
-// Type alias for embedding results to keep signatures clean
-// NOW RETURNS A VECTOR OF VECTORS (Batch Result)
+// Type alias for embedding results
 type EmbeddingResult = std::result::Result<Vec<Vec<f32>>, MagicError>;
 
 /// Request sent to the Embedding Actor
 pub struct EmbeddingRequest {
-    // UPDATED: Supports batch processing
     pub content: Vec<String>,
-    // Critical flag for Asymmetric Retrieval (Query vs Doc)
     pub is_query: bool,
     pub respond_to: oneshot::Sender<EmbeddingResult>,
+}
+
+/// A synchronization primitive for the "Smart Waiter"
+/// Allows HollowDrive (Sync FUSE) to wait for Oracle (Async Tokio)
+pub struct SearchWaiter {
+    pub finished: Mutex<bool>,
+    pub cvar: Condvar,
+}
+
+impl SearchWaiter {
+    pub fn new() -> Self {
+        Self {
+            finished: Mutex::new(false),
+            cvar: Condvar::new(),
+        }
+    }
 }
 
 /// Global shared state accessible by all organs
@@ -29,8 +43,7 @@ pub struct GlobalState {
     /// Database connection (created lazily)
     pub db_connection: Arc<std::sync::Mutex<Option<rusqlite::Connection>>>,
 
-    /// Channel to the dedicated Embedding Actor thread (replaces the Mutex<Model>)
-    /// Wrapped in RwLock<Option> to allow lazy initialization
+    /// Channel to the dedicated Embedding Actor thread
     pub embedding_tx: Arc<RwLock<Option<mpsc::Sender<EmbeddingRequest>>>>,
 
     /// Queue of file paths waiting for indexing
@@ -44,6 +57,10 @@ pub struct GlobalState {
 
     /// List of watched root directories (for Mirror Mode)
     pub watch_paths: Arc<std::sync::Mutex<Vec<String>>>,
+
+    /// Registry of active waiters (Inode -> Waiter)
+    /// Used by readdir to block until Oracle finishes
+    pub search_waiters: Arc<Mutex<HashMap<u64, Arc<SearchWaiter>>>>,
 }
 
 /// Result of a semantic search operation
@@ -68,12 +85,12 @@ impl Default for GlobalState {
             index_version: Arc::new(AtomicUsize::new(0)),
             refresh_signal: Arc::new(AtomicBool::new(false)),
             watch_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
+            search_waiters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 impl GlobalState {
-    /// Create new empty global state
     pub fn new() -> Self {
         Self::default()
     }

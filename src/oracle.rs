@@ -19,7 +19,7 @@ const MAX_CONCURRENT_INDEXERS: usize = 2;
 const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
 // Performance: Maximum number of pending search queries to debounce per tick.
-// Prevents O(N^2) CPU explosion during flood attacks (e.g. test_09).
+// Prevents O(N^2) CPU explosion during flood attacks.
 const MAX_SEARCH_BATCH_SIZE: usize = 100; 
 
 /// Helper: Checks if two strings are "related" (one is a prefix of the other).
@@ -230,7 +230,7 @@ impl Oracle {
             }
 
             // =========================================================
-            // PRIORITY 2: SEARCH DEBOUNCING (The Time-Travel Sieve)
+            // PRIORITY 2: SEARCH DEBOUNCING & SMART WAITER NOTIFICATION
             // =========================================================
 
             // A. Accumulation
@@ -261,15 +261,6 @@ impl Oracle {
                 continue;
             }
 
-            if !candidates.is_empty() {
-                if candidates.len() > 10 {
-                    tracing::info!("[Oracle] 📥 Batch Inbox: {} items (First: {:?})", candidates.len(), candidates[0].1);
-                } else {
-                    let raw_list: Vec<String> = candidates.iter().map(|(_, q)| q.clone()).collect();
-                    tracing::info!("[Oracle] 📥 Batch Inbox: {:?}", raw_list);
-                }
-            }
-
             // C. SORT BY TIME (Newest First)
             candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -280,7 +271,6 @@ impl Oracle {
 
             // E. The Sieve (Batch-Level Debouncing)
             let mut accepted_queries: Vec<(u64, String)> = Vec::new();
-            let mut pruned_count = 0;
 
             for (inode, query) in candidates {
                 let is_obsolete = accepted_queries.iter().any(|(_, accepted_q)| {
@@ -292,15 +282,21 @@ impl Oracle {
                     {
                         let state_guard = state.read().unwrap();
                         state_guard.inode_store.prune_inode(inode);
+
+                        // --- NEW: NOTIFY WAITER ON PRUNE ---
+                        // If we prune a query because it's obsolete (e.g., user typed "magic" then "magicfs"),
+                        // and there is a thread waiting on "magic", we must wake it up so it doesn't timeout.
+                        let mut waiters = state_guard.search_waiters.lock().unwrap();
+                        if let Some(waiter) = waiters.remove(&inode) {
+                            let mut finished = waiter.finished.lock().unwrap();
+                            *finished = true; // Mark as done (even though empty/pruned)
+                            waiter.cvar.notify_all();
+                        }
+                        // -----------------------------------
                     }
-                    pruned_count += 1;
                 } else {
                     accepted_queries.push((inode, query));
                 }
-            }
-
-            if pruned_count > 0 {
-                tracing::info!("[Oracle] Debounced {} intermediate queries.", pruned_count);
             }
 
             // F. Dispatch
@@ -312,14 +308,9 @@ impl Oracle {
                 };
 
                 // --- RETROACTIVE CLEANUP (Highlander Mode) ---
-                // Even if the batch was small (e.g. 1 item), we must check 
-                // ALL existing directories to see if we are superseding them.
-                // This cleans up the "Typewriter Trail" in File Managers (ranger, range, rang...).
                 {
-                    // Get thread-safe handle
                     let inode_store = state.read().unwrap().inode_store.clone();
                     
-                    // 1. Find victims (Read Lock)
                     let victims: Vec<u64> = inode_store.active_queries()
                         .iter()
                         .filter(|(other_id, other_q)| {
@@ -328,7 +319,6 @@ impl Oracle {
                         .map(|(id, _)| *id)
                         .collect();
 
-                    // 2. Kill victims (Write Lock acquired per call)
                     if !victims.is_empty() {
                          tracing::info!("[Oracle] 🧹 Cleaning up {} stale relatives for '{}'", victims.len(), query);
                          for vid in victims {
@@ -336,7 +326,6 @@ impl Oracle {
                          }
                     }
                 }
-                // ---------------------------------------------
 
                 tracing::info!("[Oracle] Dispatching search for: '{}'", query);
                 processed_queries.put(query.clone(), ());
@@ -344,9 +333,24 @@ impl Oracle {
                 let state_ref = Arc::clone(&state);
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = Searcher::perform_search(state_ref, query.clone(), inode).await {
+                    if let Err(e) = Searcher::perform_search(state_ref.clone(), query.clone(), inode).await {
                         tracing::error!("[Oracle] Search failed for '{}': {}", query, e);
                     }
+
+                    // --- NEW: NOTIFY WAITER ---
+                    // "Ring the Bell"
+                    // The Searcher has finished writing results to the InodeStore.
+                    // We now wake up the FUSE thread waiting in readdir.
+                    let state_guard = state_ref.read().unwrap();
+                    let mut waiters = state_guard.search_waiters.lock().unwrap();
+                    
+                    if let Some(waiter) = waiters.remove(&inode) {
+                        let mut finished = waiter.finished.lock().unwrap();
+                        *finished = true;
+                        waiter.cvar.notify_all();
+                        tracing::debug!("[Oracle] Notified waiter for Inode {}", inode);
+                    }
+                    // --------------------------
                 });
             }
         }
