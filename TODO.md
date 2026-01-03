@@ -1,37 +1,64 @@
-# FILE: TODO.md
-# MagicFS Roadmap
+# MagicFS Roadmap & Charter
+
+> "The goal is not just to search; it is to maintain the illusion of a physical, infinite drive."
 
 ## 🏆 Completed Milestones
-- [x] **Phase 10: The AI Engine Upgrade**
-    - **Verdict:** Nomic Embed v1.5 (768 dims) + Recursive Chunking is the winner.
-    - **Score:** High relevance (>0.70), no semantic dilution, no UTF-8 panics.
+- [x] **Phase 1: The Foundation**
+    - [x] FUSE Mount & Passthrough
+    - [x] In-Memory Inode Store
+    - [x] Async Orchestrator (The Oracle)
+- [x] **Phase 10: The AI Engine**
+    - [x] Nomic Embed v1.5 Integration (768 dims)
+    - [x] Structure-Aware Chunking (No sentence splicing)
 
 ---
 
-## 🚀 Phase 11: The "Snap" & "Flow" (UX Refinement)
-**Goal:** Make the interaction feel "native" and stop the "Admin Privileges" errors.
-- [x] **Search Debouncing / Overrides:** - *Discussion Needed:* How to handle "Typewriter" searching (r -> re -> rec). 
-    - *Ideas:* Cancel stale searches? Minimum char limit? 
-- [ ] the above typwriter task is fixed though there remains an issue. when interacting with a directory within dolhpin, if i right mouse all of the options (.zip, .tar etc) load as searches. so i am thinking is it worth revisiting this behaviour all together. i think there is benefit to having solved the typwriter fault, but it probably speaks to a bigger issue in that a lot of general interaction with the file system is triggering noise searches. even .hidden is a search.
-further to this, i found that if the search `search/foobar/` ends with a forward slash `/` then if you edit within that forward slash it will start typwriting again. this
-is sometimes needed when you have a long semantic search and you want to add or remove items from the middle of the search line. 
-do we need to think differently about interacting with this file system alltogether?
-- [ ] i made a new file in one of the watched directories and it did not appear in the MagicFS
-- [ ] what happens if i want to delete a saved search?
-- [ ] **EAGAIN Handling:** Fix the "Admin Privileges" error in Dolphin by handling async delays better.
-- [ ] **Inode Stability:** Prevent "File changed on disk" errors by pinning Inode IDs to search results.
+## 🚧 Phase 11: The Illusion of Physicality (Current Focus)
+**Goal:** MagicFS must behave exactly like a dumb USB drive. It must never "load," never error, and never ask for permissions. It must lie efficiently.
+
+### 1. The Ephemeral Container (Fixing Phantom Searches)
+* **Problem:** Right-clicking creates `search.zip` because the OS probes for file existence.
+* **Solution:** Implement "The Ephemeral Promise."
+    * `lookup()` always returns `OK` + `FileType::Directory` (never `EAGAIN`).
+    * `lookup()` does *not* persist the search or trigger the AI.
+    * **The Trigger:** Only persist the search and fire the Oracle when `readdir()` (Enter Folder) is called.
+    * **Effect:** Machine probes (which expect files) hit a "Directory" wall and stop. Human navigation (which enters folders) triggers the search.
+
+### 2. The Empty Room Promise (Fixing Admin Password Errors)
+* **Problem:** Searching `/search/foo` returns `EAGAIN` while calculating, causing OS to show "Access Denied."
+* **Solution:** "Lie First, Fix Later."
+    * `readdir()` immediately returns an empty list `[]` (Success) instead of blocking or erroring.
+    * **Background:** The Oracle runs the embedding search.
+    * **Refresh:** Once results are ready, send a kernel invalidation signal (or rely on user refresh) to populate the files.
+
+### 3. The Typewriter Fix (Typing between slashes)
+* **Problem:** Editing a path `/search/foo/` triggers searches for `f`, `fo`, `foo`.
+* **Solution:** Solved implicitly by **The Ephemeral Container**.
+    * Intermediate keystrokes create phantom directories that are never entered (`readdir` never called).
+    * Only the final directory that the user commits to (by pressing Enter/opening) gets triggered.
+
+---
 
 ## 🧠 Phase 12: Organization & Persistence (The "Second Brain")
-**Goal:** Saved views, tagging, and portable configuration.
-- [ ] **Saved Searches (Aliasing):**
-    - Map complex queries to simple folder names.
-    - *Example:* `/magic/saved/Healthy_Dinner/` -> Query: "low carb high protein dinner"
-- [ ] **The Tagging Filesystem:**
-    - "Directories are Tags." Files can live in multiple tag folders.
-    - *Vision:* `cp file.txt /magic/tags/urgent/` applies the tag.
-- [ ] **Portable Configuration (The Map):**
-    - A self-sustaining `config.yaml` that remembers watch paths, saved searches, and tags.
-    - *Goal:* "New machine, same brain."
+**Goal:** Moving from "Search" to "Curated Knowledge."
 
-## 🛠️ Phase 13: Developer Experience
-- [x] **Dev Script Polish:** Add `--keep-db` flag to `dev.sh`.
+### 1. Saved Views (Aliasing)
+* **Concept:** Map complex queries to simple folder names.
+* **Example:** `mv "/search/tax invoice 2024"` `"/magic/saved/2024_Taxes"`
+* **Tech:** A persistent `alias` map in SQLite.
+
+### 2. The Tagging Filesystem
+* **Concept:** Directories as Tags.
+* **Workflow:** Copying a file into `/magic/tags/urgent/` doesn't duplicate bytes; it adds the "urgent" vector/tag to the file's metadata.
+
+### 3. Portable Brain (Config)
+* **Concept:** `config.yaml` that makes the setup reproducible across machines.
+
+---
+
+## 🛠️ Phase 13: Developer Experience & Stability
+**Goal:** Solidify the binary for daily driving.
+
+- [ ] **Daemonize Properly:** Ensure `systemd` service handles suspend/wake cycles correctly.
+- [ ] **The "Nuke" Protocol:** A robust way to clear the cache when the AI model changes (Version pinning).
+- [ ] **Log Rotation:** Prevent `magicfs.log` from eating the disk during long runs.
