@@ -78,3 +78,19 @@
 ### 13. UTF-8 Safety (The Panic Fix)
 * **Why:** Rust strings are UTF-8. Slicing at arbitrary byte indices (e.g. `start + 150`) causes a panic if the cut lands inside a multi-byte char (e.g. emoji or symbols).
 * **Decision:** Always use `text.is_char_boundary(index)` before slicing. If invalid, scan forward to the next valid boundary.
+
+### 14. The Illusion of Physicality (Async UI)
+* **Why:** Humans interact differently than machines. Humans `cd` (navigate) then `ls` (look). Machines probe specific files.
+* **Problem:** If we wait for the DB on every `lookup`, `cd` feels sluggish. If we return empty on `readdir`, `ls` shows nothing.
+* **Decision:**
+    * **The Ephemeral Promise (Navigation):** `lookup` always returns `OK` immediately for plausible directories. Allows instant `cd`.
+    * **The Smart Waiter (Consumption):** `readdir` blocks (waits) until the Oracle finishes or a timeout occurs. Ensures `ls` sees files.
+
+### 15. Infinite Space is Read-Only (The Paradox)
+* **Why:** In a virtual search space, "creating" a folder is a logical paradox.
+* **Failure:** Dolphin enters an infinite loop trying to create "New Folder (1..N)" because it detects collisions but thinks it has permission.
+* **Decision:** Virtual directories (Search Root, Query Results) must be **Read-Only (0o555)**. This disables the "Create New Folder" UI in file managers, preventing the loop.
+
+### 16. Time Stability (The Nervous Twitch)
+* **Why:** File managers cache directory contents based on `mtime`. If `mtime` updates on every access (SystemTime::now), the file manager invalidates its cache and rescans constantly (Infinite Loop).
+* **Decision:** Virtual directories must report a **Stable Timestamp** (Daemon Start Time). This allows the OS to trust its cache and stop probing for hidden files.

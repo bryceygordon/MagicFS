@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 use crate::error::MagicError;
 use crate::core::inode_store::InodeStore;
 use std::collections::HashMap;
+use std::time::SystemTime; // Added import
 
 // Type alias for embedding results
 type EmbeddingResult = std::result::Result<Vec<Vec<f32>>, MagicError>;
@@ -20,7 +21,6 @@ pub struct EmbeddingRequest {
 }
 
 /// A synchronization primitive for the "Smart Waiter"
-/// Allows HollowDrive (Sync FUSE) to wait for Oracle (Async Tokio)
 pub struct SearchWaiter {
     pub finished: Mutex<bool>,
     pub cvar: Condvar,
@@ -59,8 +59,11 @@ pub struct GlobalState {
     pub watch_paths: Arc<std::sync::Mutex<Vec<String>>>,
 
     /// Registry of active waiters (Inode -> Waiter)
-    /// Used by readdir to block until Oracle finishes
     pub search_waiters: Arc<Mutex<HashMap<u64, Arc<SearchWaiter>>>>,
+
+    /// The Anchor: When did this filesystem start?
+    /// Used to provide stable mtime for virtual directories.
+    pub start_time: SystemTime,
 }
 
 /// Result of a semantic search operation
@@ -86,6 +89,7 @@ impl Default for GlobalState {
             refresh_signal: Arc::new(AtomicBool::new(false)),
             watch_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
             search_waiters: Arc::new(Mutex::new(HashMap::new())),
+            start_time: SystemTime::now(), // Anchor established on boot
         }
     }
 }

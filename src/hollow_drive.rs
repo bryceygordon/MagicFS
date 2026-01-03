@@ -60,10 +60,14 @@ impl Filesystem for HollowDrive {
             None => { reply.error(libc::EINVAL); return; }
         };
 
+        // STABLE TIME: Use the daemon start time for entries
+        let stable_time = self.state.read().unwrap().start_time;
         let ttl = Duration::from_secs(1);
+        
         let mk_attr = |ino: u64, kind: fuser::FileType, perm: u16| fuser::FileAttr {
-            ino, size: 4096, blocks: 8, atime: SystemTime::now(), mtime: SystemTime::now(),
-            ctime: SystemTime::now(), crtime: SystemTime::now(), kind, perm, nlink: 2,
+            ino, size: 4096, blocks: 8, 
+            atime: stable_time, mtime: stable_time, ctime: stable_time, crtime: stable_time, 
+            kind, perm, nlink: 2,
             uid: 1000, gid: 1000, rdev: 0, blksize: 4096, flags: 0,
         };
 
@@ -72,7 +76,7 @@ impl Filesystem for HollowDrive {
             match name_str {
                 "." | ".." => reply.entry(&ttl, &mk_attr(1, fuser::FileType::Directory, 0o755), 0),
                 ".magic" => reply.entry(&ttl, &mk_attr(2, fuser::FileType::Directory, 0o755), 0),
-                "search" => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory, 0o555), 0), // Read-Only!
+                "search" => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory, 0o555), 0),
                 "mirror" => reply.entry(&ttl, &mk_attr(5, fuser::FileType::Directory, 0o755), 0),
                 _ => reply.error(libc::ENOENT),
             }
@@ -97,25 +101,26 @@ impl Filesystem for HollowDrive {
             match name_str {
                 "." | ".." => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory, 0o555), 0),
                 _ => {
-                    // --- A. THE BOUNCER (Reject Noise) ---
+                    // --- A. THE BOUNCER ---
                     if name_str.starts_with(".") || 
                        name_str.ends_with(".zip") || 
                        name_str.ends_with(".tar") ||
                        name_str.ends_with(".gz") ||
                        name_str.ends_with(".ini") ||
-                       name_str.ends_with(".desktop") {
+                       name_str.ends_with(".desktop") ||
+                       name_str.starts_with("New Folder") {
                         tracing::debug!("[HollowDrive] Bouncer rejected: {}", name_str);
                         reply.error(libc::ENOENT);
                         return;
                     }
 
-                    // --- B. THE EPHEMERAL PROMISE (Instant Success) ---
+                    // --- B. THE EPHEMERAL PROMISE ---
                     let query = name_str.to_string();
                     let state_guard = self.state.read().unwrap();
                     let inode = state_guard.inode_store.get_or_create_inode(&query);
                     drop(state_guard);
 
-                    // Search Results are Read-Only (0o555) to prevent mkdir loops deeper down
+                    // Return with STABLE time
                     reply.entry(&ttl, &mk_attr(inode, fuser::FileType::Directory, 0o555), 0);
                 }
             }
@@ -167,7 +172,16 @@ impl Filesystem for HollowDrive {
                 if let Ok(meta) = std::fs::metadata(&child_path) {
                     let kind = if meta.is_dir() { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
                     let perm = if meta.is_dir() { 0o755 } else { 0o644 };
-                    reply.entry(&ttl, &mk_attr(child_inode, kind, perm), 0);
+                    
+                    // REAL files get REAL timestamps
+                    let mut attr = mk_attr(child_inode, kind, perm);
+                    attr.size = meta.len();
+                    attr.blocks = (attr.size + 511)/512;
+                    if let Ok(m) = meta.modified() { attr.mtime = m; }
+                    if let Ok(a) = meta.accessed() { attr.atime = a; }
+                    if let Ok(c) = meta.created() { attr.crtime = c; }
+                    
+                    reply.entry(&ttl, &attr, 0);
                 } else {
                     reply.error(libc::ENOENT);
                 }
@@ -179,29 +193,32 @@ impl Filesystem for HollowDrive {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        let stable_time = self.state.read().unwrap().start_time;
         let ttl = Duration::from_secs(1);
+        
         let mut attr = fuser::FileAttr {
-            ino, size: 4096, blocks: 8, atime: SystemTime::now(), mtime: SystemTime::now(),
-            ctime: SystemTime::now(), crtime: SystemTime::now(), kind: fuser::FileType::Directory,
+            ino, size: 4096, blocks: 8, 
+            atime: stable_time, mtime: stable_time, ctime: stable_time, crtime: stable_time, 
+            kind: fuser::FileType::Directory,
             perm: 0o755, nlink: 2, uid: 1000, gid: 1000, rdev: 0, blksize: 4096, flags: 0,
         };
 
         match ino {
-            1 => {}, // Root
-            2 => {}, // .magic
+            1 => {}, // Root (Stable)
+            2 => {}, // .magic (Stable)
             3 => { 
-                // --- THE FIX: Read-Only ---
-                // Prevents mkdir "New Folder" loops
-                attr.perm = 0o555; 
+                attr.perm = 0o555; // Search Root (Stable, Read-Only)
             },
             4 => { attr.kind = fuser::FileType::RegularFile; attr.size = 0; attr.perm = 0o666; attr.nlink = 1; }, 
-            5 => {}, // Mirror
+            5 => {}, // Mirror (Stable)
             _ => {
                 let is_search_dir = self.state.read().unwrap().inode_store.get_query(ino).is_some();
                 if is_search_dir {
-                    // Dynamic Search Directories are also Read-Only
+                    // Search Query Dirs are STABLE and Read-Only
                     attr.perm = 0o555;
                 } else {
+                    // Everything else is a Real File (or Search Result File)
+                    // These need REAL timestamps to detect changes
                     if let Some(real_path) = self.find_real_path(ino) {
                         if let Ok(meta) = std::fs::metadata(&real_path) {
                             attr.size = meta.len();
@@ -214,6 +231,7 @@ impl Filesystem for HollowDrive {
                             if let Ok(c) = meta.created() { attr.crtime = c; }
                         }
                     } else {
+                        // Fallback for search results not yet mapped?
                         attr.kind = fuser::FileType::RegularFile; attr.size = 1024; attr.perm = 0o644; attr.nlink = 1;
                     }
                 }
@@ -223,11 +241,6 @@ impl Filesystem for HollowDrive {
     }
 
     // ... [setattr, readdir, open, read, write SAME AS PREVIOUS] ...
-    // Note: I am omitting the unchanged methods to keep this response concise.
-    // They are identical to the version provided in the previous "Full Unabridged" step, 
-    // as getattr handles the permission logic centrally.
-    
-    // RE-INCLUDED FOR COMPLETENESS UPON REQUEST:
     fn setattr(
         &mut self,
         _req: &Request,
@@ -395,8 +408,8 @@ impl Filesystem for HollowDrive {
                     drop(state_guard);
                     for (i, (ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
                         if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
-                    }
-                    reply.ok(); return;
+                     }
+                     reply.ok(); return;
                 }
             } else {
                 if let Some(results) = state_guard.inode_store.get_results(ino) {
