@@ -18,10 +18,9 @@ use std::collections::HashSet;
 const MAX_CONCURRENT_INDEXERS: usize = 2;
 const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
-/// Helper: Checks if 'needle' is a prefix of 'haystack'.
-fn is_prefix(needle: &str, haystack: &str) -> bool {
-    haystack.starts_with(needle) && haystack != needle
-}
+// Performance: Maximum number of pending search queries to debounce per tick.
+// Prevents O(N^2) CPU explosion during flood attacks (e.g. test_09).
+const MAX_SEARCH_BATCH_SIZE: usize = 100; 
 
 /// Helper: Checks if two strings are "related" (one is a prefix of the other).
 /// Returns true if `a` starts with `b` OR `b` starts with `a`.
@@ -153,7 +152,9 @@ impl Oracle {
                 active_jobs.remove(&finished_path);
             }
 
-            // PRIORITY 1: INDEXING
+            // =========================================================
+            // PRIORITY 1: INDEXING (Lockout/Tagout System)
+            // =========================================================
             let mut unprocessed_files: Vec<String> = Vec::new();
             let mut tick_locked_files: HashSet<String> = HashSet::new();
 
@@ -228,92 +229,98 @@ impl Oracle {
                 lock.extend(new_items);
             }
 
-            // PRIORITY 2: SEARCHING
-            
-            // --- Accumulation Delay (Debouncing) ---
-            let has_candidates = {
+            // =========================================================
+            // PRIORITY 2: SEARCH DEBOUNCING (The Time-Travel Sieve)
+            // =========================================================
+
+            // A. Accumulation
+            let has_work = {
                 let state_guard = state.read().unwrap();
-                let active = state_guard.inode_store.active_queries();
-                !active.is_empty()
+                !state_guard.inode_store.active_queries().is_empty()
             };
 
-            if has_candidates {
-                // Wait 20ms to allow "Typewriter Bursts" to accumulate
+            if has_work {
+                // The "Accumulation Window"
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
 
-            // Step A: Gather candidates
-            let candidates: Vec<(String, u64)> = {
-                let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
-                let inode_store = &state_guard.inode_store;
+            // B. Snapshot & Filter
+            let mut candidates: Vec<(u64, String)> = {
+                let state_guard = state.read().unwrap();
+                let mut list = state_guard.inode_store.active_queries();
                 
-                inode_store.active_queries()
-                    .into_iter()
-                    .filter(|(inode, query)| {
-                        let is_processed = processed_queries.contains(query);
-                        let has_results = inode_store.has_results(*inode);
-                        if !is_processed && !has_results { true } else { false }
-                    })
-                    .map(|(inode, query)| (query, inode))
-                    .collect()
+                // FILTER: Ignore queries we have already processed/cached results for
+                list.retain(|(inode, query)| {
+                    !processed_queries.contains(query) && !state_guard.inode_store.has_results(*inode)
+                });
+                
+                list
             };
 
-            if !candidates.is_empty() {
-                let raw_list: Vec<String> = candidates.iter().map(|(q, _)| q.clone()).collect();
-                tracing::info!("[Oracle] 📥 Batch Inbox: {:?}", raw_list);
+            if candidates.is_empty() {
+                continue;
             }
 
-            // Step B: Time-Aware Debouncing (Latest Wins)
-            
-            let mut queries_to_process = Vec::new();
-            let mut pending_accepted: Vec<String> = Vec::new();
-            let mut suppressed_count = 0;
+            if !candidates.is_empty() {
+                // Logging 2000 items is also slow, so truncate log output conceptually
+                if candidates.len() > 10 {
+                    tracing::info!("[Oracle] 📥 Batch Inbox: {} items (First: {:?})", candidates.len(), candidates[0].1);
+                } else {
+                    let raw_list: Vec<String> = candidates.iter().map(|(_, q)| q.clone()).collect();
+                    tracing::info!("[Oracle] 📥 Batch Inbox: {:?}", raw_list);
+                }
+            }
 
-            for (query, inode) in candidates.into_iter() {
-                // Check if this query is "related" to any query we have ALREADY accepted (which is NEWER).
-                // If "magicfs" is accepted, and we see "magic", we drop "magic". (Typing)
-                // If "mag" is accepted, and we see "magic", we drop "magic". (Backspacing)
-                
-                let is_stale = pending_accepted.iter().any(|accepted| are_related_queries(&query, accepted));
+            // C. SORT BY TIME (Newest First)
+            candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
-                if is_stale {
-                    tracing::debug!("[Oracle] 👻 Ghost Busting: Removing stale inode for '{}'", query);
-                    
-                    // CLEANUP: We don't just ignore it, we DELETE it from the file system view.
+            // D. BATCH LIMITING (The Fix for Test 09)
+            // We only process the NEWEST 100 queries this tick.
+            // The rest wait for the next tick. This prevents O(N^2) explosion.
+            if candidates.len() > MAX_SEARCH_BATCH_SIZE {
+                candidates.truncate(MAX_SEARCH_BATCH_SIZE);
+            }
+
+            // E. The Sieve
+            let mut accepted_queries: Vec<(u64, String)> = Vec::new();
+            let mut pruned_count = 0;
+
+            for (inode, query) in candidates {
+                let is_obsolete = accepted_queries.iter().any(|(_, accepted_q)| {
+                    are_related_queries(&query, accepted_q)
+                });
+
+                if is_obsolete {
+                    tracing::debug!("[Oracle] 👻 Ghost Busting: Pruning obsolete intent '{}' (ID: {})", query, inode);
                     {
                         let state_guard = state.read().unwrap();
                         state_guard.inode_store.prune_inode(inode);
                     }
-                    // CRITICAL: Do NOT add to processed_queries. 
-                    // If user backspaces to it later, it must be treated as new.
-                    suppressed_count += 1;
+                    pruned_count += 1;
                 } else {
-                    queries_to_process.push((query.clone(), inode));
-                    pending_accepted.push(query);
+                    accepted_queries.push((inode, query));
                 }
             }
-            
-            if suppressed_count > 0 {
-                tracing::info!("[Oracle] Debounced and pruned {} intermediate queries.", suppressed_count);
+
+            if pruned_count > 0 {
+                tracing::info!("[Oracle] Debounced {} intermediate queries.", pruned_count);
             }
 
-            // Limit concurrency
-            queries_to_process.truncate(5);
-
-            // Step C: Dispatch
-            for (query, inode_num) in queries_to_process {
+            // F. Dispatch
+            for (inode, query) in accepted_queries {
+                // Limit concurrency
                 let permit = match search_semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
-                    Err(_) => { break; }
+                    Err(_) => break, // Searcher saturated, try next tick
                 };
-                
+
                 tracing::info!("[Oracle] Dispatching search for: '{}'", query);
-                let state_ref = Arc::clone(&state);
                 processed_queries.put(query.clone(), ());
 
+                let state_ref = Arc::clone(&state);
                 tokio::spawn(async move {
-                    let _permit = permit; 
-                    if let Err(e) = Searcher::perform_search(state_ref, query.clone(), inode_num).await {
+                    let _permit = permit;
+                    if let Err(e) = Searcher::perform_search(state_ref, query.clone(), inode).await {
                         tracing::error!("[Oracle] Search failed for '{}': {}", query, e);
                     }
                 });

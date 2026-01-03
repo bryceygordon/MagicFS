@@ -1,6 +1,6 @@
 // FILE: src/core/inode_store.rs
 use std::collections::{HashMap, BTreeMap};
-use std::sync::RwLock; // [FIXED] Removed unused 'Arc'
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::state::SearchResult;
 use std::hash::{Hash, Hasher};
@@ -27,7 +27,7 @@ pub struct InodeStore {
     // Counter for new dynamic inodes
     next_inode: RwLock<u64>,
 
-    // [RESTORED] Maps Inode ID -> Real File Path (for Mirror Mode)
+    // Maps Inode ID -> Real File Path (for Mirror Mode)
     mirror_paths: RwLock<HashMap<u64, String>>,
 }
 
@@ -49,7 +49,8 @@ impl InodeStore {
         Self {
             queries: RwLock::new(HashMap::new()),
             inodes: RwLock::new(inodes),
-            next_inode: RwLock::new(2),
+            // FIX: Start at 100 to avoid collision with reserved FUSE inodes (1=Root, 2=.magic, 3=search, 4=refresh, 5=mirror)
+            next_inode: RwLock::new(100),
             mirror_paths: RwLock::new(HashMap::new()),
         }
     }
@@ -101,12 +102,10 @@ impl InodeStore {
         self.inodes.read().unwrap().get(&inode).cloned()
     }
 
-    // [RESTORED]
     pub fn get_query(&self, inode: u64) -> Option<String> {
         self.inodes.read().unwrap().get(&inode).map(|n| n.query.clone())
     }
 
-    // [RESTORED]
     pub fn get_results(&self, inode: u64) -> Option<Vec<SearchResult>> {
         self.inodes.read().unwrap().get(&inode).and_then(|n| n.results.clone())
     }
@@ -126,32 +125,30 @@ impl InodeStore {
         false
     }
 
-    // [RESTORED] Deterministic hashing for file mapping
+    // Deterministic hashing for file mapping (used for Mirror Mode and Search Results)
     pub fn hash_to_inode(&self, key: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        // Ensure it doesn't collide with reserved inodes (0, 1) or small counters
-        // We use the top bit or a large offset to separate these from sequential IDs if needed.
-        // For simplicity in this mock, we just use the hash directly but ensure it's > 100000.
+        // Ensure it doesn't collide with reserved inodes or small counters
         hasher.finish().saturating_add(100000)
     }
 
-    // [RESTORED] Mirror Path Management
+    // Mirror Path Management
     pub fn put_mirror_path(&self, inode: u64, path: String) {
         self.mirror_paths.write().unwrap().insert(inode, path);
     }
 
-    // [RESTORED]
     pub fn get_mirror_path(&self, inode: u64) -> Option<String> {
         self.mirror_paths.read().unwrap().get(&inode).cloned()
     }
 
-    /// Returns a snapshot of active queries (Query, InodeID)
+    /// Returns a snapshot of active queries (InodeID, QueryString)
     /// Used by Oracle to find work.
+    /// FIX: Filter IDs > 5 to avoid picking up reserved system directories.
     pub fn active_queries(&self) -> Vec<(u64, String)> {
         let inodes = self.inodes.read().unwrap();
         inodes.values()
-            .filter(|n| n.id > 1 && n.is_dir) // Skip root and files
+            .filter(|n| n.id > 5 && n.is_dir) 
             .map(|n| (n.id, n.query.clone()))
             .collect()
     }
@@ -167,7 +164,8 @@ impl InodeStore {
 
     // --- Ghost Busting (Debouncing) ---
     pub fn prune_inode(&self, inode: u64) {
-        if inode <= 1 { return; } // Protect Root
+        // FIX: Protect reserved inodes (1-5)
+        if inode <= 5 { return; } 
 
         let mut inodes = self.inodes.write().unwrap();
         let mut queries = self.queries.write().unwrap();
