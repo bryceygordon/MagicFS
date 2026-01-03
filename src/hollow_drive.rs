@@ -61,43 +61,43 @@ impl Filesystem for HollowDrive {
         };
 
         let ttl = Duration::from_secs(1);
-        let mk_attr = |ino: u64, kind: fuser::FileType| fuser::FileAttr {
+        let mk_attr = |ino: u64, kind: fuser::FileType, perm: u16| fuser::FileAttr {
             ino, size: 4096, blocks: 8, atime: SystemTime::now(), mtime: SystemTime::now(),
-            ctime: SystemTime::now(), crtime: SystemTime::now(), kind, perm: 0o755, nlink: 2,
+            ctime: SystemTime::now(), crtime: SystemTime::now(), kind, perm, nlink: 2,
             uid: 1000, gid: 1000, rdev: 0, blksize: 4096, flags: 0,
         };
 
-        // ... [Root, .magic, etc handling same as before] ...
+        // 1. Root Directory
         if parent == 1 {
             match name_str {
-                "." | ".." => reply.entry(&ttl, &mk_attr(1, fuser::FileType::Directory), 0),
-                ".magic" => reply.entry(&ttl, &mk_attr(2, fuser::FileType::Directory), 0),
-                "search" => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory), 0),
-                "mirror" => reply.entry(&ttl, &mk_attr(5, fuser::FileType::Directory), 0),
+                "." | ".." => reply.entry(&ttl, &mk_attr(1, fuser::FileType::Directory, 0o755), 0),
+                ".magic" => reply.entry(&ttl, &mk_attr(2, fuser::FileType::Directory, 0o755), 0),
+                "search" => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory, 0o555), 0), // Read-Only!
+                "mirror" => reply.entry(&ttl, &mk_attr(5, fuser::FileType::Directory, 0o755), 0),
                 _ => reply.error(libc::ENOENT),
             }
             return;
         }
 
-        if parent == 2 { // .magic
+        // 2. .magic
+        if parent == 2 { 
             if name_str == "refresh" {
-                let mut attr = mk_attr(4, fuser::FileType::RegularFile);
-                attr.size = 0; attr.perm = 0o666;
+                let mut attr = mk_attr(4, fuser::FileType::RegularFile, 0o666);
+                attr.size = 0; 
                 reply.entry(&ttl, &attr, 0); return;
             }
              if name_str == "." || name_str == ".." {
-                reply.entry(&ttl, &mk_attr(2, fuser::FileType::Directory), 0); return;
+                reply.entry(&ttl, &mk_attr(2, fuser::FileType::Directory, 0o755), 0); return;
             }
             reply.error(libc::ENOENT); return;
         }
 
-        // 3. Search Root (THE MAJOR CHANGES START HERE)
+        // 3. Search Root
         if parent == 3 {
             match name_str {
-                "." | ".." => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory), 0),
+                "." | ".." => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory, 0o555), 0),
                 _ => {
                     // --- A. THE BOUNCER (Reject Noise) ---
-                    // Reject hidden files and common machine probes
                     if name_str.starts_with(".") || 
                        name_str.ends_with(".zip") || 
                        name_str.ends_with(".tar") ||
@@ -110,26 +110,22 @@ impl Filesystem for HollowDrive {
                     }
 
                     // --- B. THE EPHEMERAL PROMISE (Instant Success) ---
-                    // We DO NOT wait for the Oracle. We DO NOT check results.
-                    // We simply say "Yes, this directory exists."
                     let query = name_str.to_string();
                     let state_guard = self.state.read().unwrap();
                     let inode = state_guard.inode_store.get_or_create_inode(&query);
                     drop(state_guard);
 
-                    // Return OK immediately. 
-                    // The Oracle will be triggered later by readdir (if human) 
-                    // or ignored (if machine probe).
-                    reply.entry(&ttl, &mk_attr(inode, fuser::FileType::Directory), 0);
+                    // Search Results are Read-Only (0o555) to prevent mkdir loops deeper down
+                    reply.entry(&ttl, &mk_attr(inode, fuser::FileType::Directory, 0o555), 0);
                 }
             }
             return;
         }
 
-        // ... [Mirror Root (Inode 5) handling same as before] ...
+        // 4. Mirror Root (Inode 5)
         if parent == 5 {
              if name_str == "." || name_str == ".." {
-                reply.entry(&ttl, &mk_attr(5, fuser::FileType::Directory), 0); return;
+                reply.entry(&ttl, &mk_attr(5, fuser::FileType::Directory, 0o755), 0); return;
             }
             let state_guard = self.state.read().unwrap();
             let wp_guard = state_guard.watch_paths.lock().unwrap();
@@ -140,7 +136,7 @@ impl Filesystem for HollowDrive {
                     if filename.to_str() == Some(name_str) {
                         let inode = state_guard.inode_store.hash_to_inode(path_str);
                         state_guard.inode_store.put_mirror_path(inode, path_str.clone());
-                        reply.entry(&ttl, &mk_attr(inode, fuser::FileType::Directory), 0);
+                        reply.entry(&ttl, &mk_attr(inode, fuser::FileType::Directory, 0o755), 0);
                         return;
                     }
                 }
@@ -148,7 +144,7 @@ impl Filesystem for HollowDrive {
             reply.error(libc::ENOENT); return;
         }
 
-        // 5. Dynamic Content (Search Results OR Mirror Subdirs)
+        // 5. Dynamic Content
         if parent > 5 {
             let state_guard = self.state.read().unwrap();
             let inode_store = &state_guard.inode_store;
@@ -156,7 +152,8 @@ impl Filesystem for HollowDrive {
             // Search Query -> Result File
             if inode_store.get_query(parent).is_some() {
                 let file_inode = inode_store.hash_to_inode(&format!("{}-{}", parent, name_str));
-                reply.entry(&ttl, &mk_attr(file_inode, fuser::FileType::RegularFile), 0);
+                // Files are Read-Write (Passthrough)
+                reply.entry(&ttl, &mk_attr(file_inode, fuser::FileType::RegularFile, 0o644), 0);
                 return;
             }
             
@@ -169,7 +166,8 @@ impl Filesystem for HollowDrive {
 
                 if let Ok(meta) = std::fs::metadata(&child_path) {
                     let kind = if meta.is_dir() { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
-                    reply.entry(&ttl, &mk_attr(child_inode, kind), 0);
+                    let perm = if meta.is_dir() { 0o755 } else { 0o644 };
+                    reply.entry(&ttl, &mk_attr(child_inode, kind, perm), 0);
                 } else {
                     reply.error(libc::ENOENT);
                 }
@@ -180,7 +178,6 @@ impl Filesystem for HollowDrive {
         reply.error(libc::ENOENT);
     }
 
-    // ... [getattr/setattr same as before] ...
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         let ttl = Duration::from_secs(1);
         let mut attr = fuser::FileAttr {
@@ -190,12 +187,21 @@ impl Filesystem for HollowDrive {
         };
 
         match ino {
-            1..=3 => {}, 
+            1 => {}, // Root
+            2 => {}, // .magic
+            3 => { 
+                // --- THE FIX: Read-Only ---
+                // Prevents mkdir "New Folder" loops
+                attr.perm = 0o555; 
+            },
             4 => { attr.kind = fuser::FileType::RegularFile; attr.size = 0; attr.perm = 0o666; attr.nlink = 1; }, 
-            5 => {}, 
+            5 => {}, // Mirror
             _ => {
                 let is_search_dir = self.state.read().unwrap().inode_store.get_query(ino).is_some();
-                if !is_search_dir {
+                if is_search_dir {
+                    // Dynamic Search Directories are also Read-Only
+                    attr.perm = 0o555;
+                } else {
                     if let Some(real_path) = self.find_real_path(ino) {
                         if let Ok(meta) = std::fs::metadata(&real_path) {
                             attr.size = meta.len();
@@ -208,7 +214,6 @@ impl Filesystem for HollowDrive {
                             if let Ok(c) = meta.created() { attr.crtime = c; }
                         }
                     } else {
-                        // Default fallback for search results before real path lookup
                         attr.kind = fuser::FileType::RegularFile; attr.size = 1024; attr.perm = 0o644; attr.nlink = 1;
                     }
                 }
@@ -217,6 +222,12 @@ impl Filesystem for HollowDrive {
         reply.attr(&ttl, &attr);
     }
 
+    // ... [setattr, readdir, open, read, write SAME AS PREVIOUS] ...
+    // Note: I am omitting the unchanged methods to keep this response concise.
+    // They are identical to the version provided in the previous "Full Unabridged" step, 
+    // as getattr handles the permission logic centrally.
+    
+    // RE-INCLUDED FOR COMPLETENESS UPON REQUEST:
     fn setattr(
         &mut self,
         _req: &Request,
@@ -350,13 +361,10 @@ impl Filesystem for HollowDrive {
         let state_guard = self.state.read().unwrap();
         
         // --- A. Search Results (SMART WAITER) ---
-        // Check if this inode represents a search query
         if state_guard.inode_store.get_query(ino).is_some() {
-            // Check if results are ready
             if !state_guard.inode_store.has_results(ino) {
                 drop(state_guard); // Release lock before waiting
 
-                // 1. Create Waiter
                 let waiter = Arc::new(SearchWaiter::new());
                 {
                     let sg = self.state.read().unwrap();
@@ -364,16 +372,11 @@ impl Filesystem for HollowDrive {
                     waiters.insert(ino, waiter.clone());
                 }
 
-                // 2. Wait for Notification (Safety Valve: 1.0s timeout)
-                // This blocks the FUSE thread, which is what we want (Smart Waiter)
                 let mut finished = waiter.finished.lock().unwrap();
                 if !*finished {
-                    // "Hesitation"
                     let _result = waiter.cvar.wait_timeout(finished, Duration::from_millis(1000)).unwrap();
-                    // We don't care if it timed out or was notified; we check the DB next.
                 }
                 
-                // 3. Re-acquire lock to read results
                 let state_guard = self.state.read().unwrap();
                 if let Some(results) = state_guard.inode_store.get_results(ino) {
                      let mut items = entries.clone();
@@ -389,16 +392,13 @@ impl Filesystem for HollowDrive {
                      }
                      reply.ok(); return;
                 } else {
-                    // Safety Valve Tripped or Empty Results
                     drop(state_guard);
-                    // Return empty directory (stops UI freeze, allows refresh later)
                     for (i, (ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
                         if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
                     }
                     reply.ok(); return;
                 }
             } else {
-                // Results were ready immediately
                 if let Some(results) = state_guard.inode_store.get_results(ino) {
                      let mut items = entries.clone();
                      for result in results {
@@ -416,7 +416,7 @@ impl Filesystem for HollowDrive {
             }
         }
 
-        // --- B. Mirror Subdirs (Existing logic) ---
+        // --- B. Mirror Subdirs ---
         if let Some(real_path) = state_guard.inode_store.get_mirror_path(ino) {
             let inode_store = &state_guard.inode_store;
             let mut items = entries.clone();
@@ -447,7 +447,6 @@ impl Filesystem for HollowDrive {
         reply.ok();
     }
     
-    // ... [open, read, write same as before] ...
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         if ino == 4 { reply.opened(0, 0); return; }
         if let Some(real_path) = self.find_real_path(ino) {

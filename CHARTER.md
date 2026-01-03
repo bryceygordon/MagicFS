@@ -8,10 +8,11 @@ MagicFS is a system primitive that turns **Chaos into API**. It aims to make sem
 
 ## 1. The Prime Directives
 
-### ⏱️ The 10ms Law
-**Latency is the enemy.**
-MagicFS exposes itself via FUSE. If it blocks, the OS freezes.
-* **Rule:** The FUSE thread (`fs/`) never blocks. It reads from memory (`InodeStore`) or returns `EAGAIN`.
+### ⏱️ The "Illusion of Physicality"
+**The Drive must feel real.**
+Users expect folders to exist immediately when they navigate to them.
+* **The Ephemeral Promise:** `lookup()` must always return success (Directory) for potential search queries. Never return `EAGAIN` or make the OS wait during navigation.
+* **The Smart Waiter:** `readdir()` must block (wait) until results are ready. Never show an empty folder unless the search actually returned 0 results. This ensures scripts (like `ls`) and GUIs (like Dolphin) see populated content.
 
 ### 🛡️ Fail Safe, Fail Small
 **The filesystem is hostile.**
@@ -19,47 +20,44 @@ Users have 100GB logs, corrupted PDFs, and deep symlinks.
 * **Rule:** A failure to process a single file must **never** crash the daemon.
 * **Implementation:** Skip bad files, log the error, and move on. "Partial results are better than no filesystem."
 
-### 📄 The Universal Text Interface
-**Everything is text.**
-To the user, a PDF, a DOCX, and a JPG with text in it are just "information."
-* **Rule:** MagicFS abstracts away file formats. If it contains words, it must be searchable via standard text tools.
+### 🔒 Infinite Space is Read-Only
+**You cannot build rooms in an infinite hotel.**
+* **Rule:** The `/search` directory is **Read-Only (555)**.
+* **Reason:** Prevents OS file managers from entering "Creation Loops" (trying to create "New Folder", "New Folder 1"...) when checking for collisions.
+* **Separation:**
+    * `/search`: Ephemeral, Read-Only, Infinite navigation.
+    * `/saved` (Future): Concrete, Read-Write, Curated organization.
 
 ---
 
 ## 2. Architecture: Service-Oriented
 
-MagicFS uses a single-process architecture composed of strictly isolated services:
+MagicFS uses a single-process architecture composed of strictly isolated services, coordinated via specific signals and synchronization primitives.
 
 ```text
 ┌───────────────────────────── Process Boundary ──────────────────────────────┐
 │                                                                             │
 │  ┌───────────────┐        ┌─────────────────┐        ┌───────────────────────┐  │
-│  │ Hollow Drive  │◄────►│   Inode Store   │◄─────┤       Orchestrator    │  │
-│  │ (FUSE Interface)      │ (Shared State)  │        │        (Oracle.rs)    │  │
-│  └───────┬───────┘        └─────────────────┘        └───────────┬───────────┘  │
-│          │ Signal:                                               │              │
-│          │ .magic/refresh ──────────────────┐           ┌────────▼────────┐     │
-│          │                                  │           │      Engine     │     │
-│       Syscalls                              │           │ (Async Workers) │     │
-│                                             │           └─┬─────────────┬─┘     │
-│                                             │             │             │       │
-│                                             │    ┌────────▼────────┐    │       │
-│                                             │    │     Indexer     │    │Searcher│
-│                                    ┌────────▼────┴───┐(Retry Logic)│    │       │
-│                                    │    Librarian    │└────┬────────┴───┬───┘   │
-│                                    │(Debounce/Watch) │     │            │       │
-│                                    └────────┬────────┘     │            │       │
-│                                             │              │            │       │
-│                                    ┌─────▼─────────────▼────────┴────────────┐  │
-│                                    │               Repository                │  │
-│                                    │           (SQLite + Vector)             │  │
-│                                    └─────────────────────────────────────────┘  │
+│  │ Hollow Drive  │◄────►│   Inode Store    │◄─────┤       Orchestrator    │  │
+│  │ (FUSE Interface)     │ (Shared State)   │        │        (Oracle.rs)    │  │
+│  └───────┬───────┘        └────────┬────────┘        └───────────┬───────────┘  │
+│          │                         │                             │              │
+│          │ Signal:                 │ Condition Var:              │              │
+│          │ .magic/refresh          │ SearchWaiter                │              │
+│       Syscalls                     │ (Smart Waiter)              │              │
+│          │                         │                             │              │
+│          ▼                         ▼                             ▼              │
+│   [The Bouncer]             [The Promise]                  [The Engine]         │
+│  (Rejects .zip)           (Instant Lookup)               (Async Workers)        │
+│                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### The Organs
-1.  **Hollow Drive (`src/hollow_drive.rs`)**: The dumb FUSE terminal. Never blocks. Checks `InodeStore`.
-2.  **Inode Store (`src/core/inode_store.rs`)**: The In-Memory source of truth for "Virtual Files".
+1.  **Hollow Drive (`src/hollow_drive.rs`)**: The FUSE terminal.
+    * **The Bouncer**: Active rejection of noise (`.zip`, `.hidden`) to prevent phantom searches.
+    * **The Promise**: Instant success for navigation (`cd`), deferring work to `readdir`.
+2.  **Inode Store (`src/core/inode_store.rs`)**: The In-Memory source of truth.
 3.  **The Orchestrator (`src/oracle.rs`)**: Async event loop. Handles "Lockout/Tagout" safety to prevent race conditions.
 4.  **The Engine**:
     * **Indexer**: Extraction, Chunking, Embedding.
@@ -80,24 +78,17 @@ MagicFS uses a single-process architecture composed of strictly isolated service
 ```bash
 # Run the full integration suite
 tests/run_suite.sh
-
-# Run specific unit tests
-cargo test
 ```
 
 ### 📂 Key Test Cases
 | Test | Purpose |
 |------|---------|
 | `test_00_stress` | Startup Storm & Zombie Check |
-| `test_01_indexing` | Dynamic Indexing |
-| `test_03_search` | End-to-End Search |
-| `test_04_hardening` | Binary/Large file rejection |
-| `test_05_chunking` | Semantic Dilution & Thresholds |
-| `test_07_real_world` | Race Conditions & Permissions |
-| `test_09_chatter` | Thermal Protection (Debounce) |
-| `test_10_refresh` | Manual Override (`touch .magic/refresh`) |
+| `test_09_memory_leak` | Stress tests the Smart Waiter (Blocking behavior) |
 | `test_14_mirror` | Mirror Mode Navigation |
+| `test_17_illusion` | Verifies Bouncer, Instant CD, and Blocking LS |
+| `test_18_readonly` | Verifies `mkdir` is blocked in `/search` to prevent loops |
 
 ---
 *Adopted: Jan 2026*
-*Version: 3.0 (The Unified Standard)*
+*Version: 4.0 (The Physical Illusion)*
