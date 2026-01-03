@@ -16,6 +16,8 @@
 further to this, i found that if the search `search/foobar/` ends with a forward slash `/` then if you edit within that forward slash it will start typwriting again. this
 is sometimes needed when you have a long semantic search and you want to add or remove items from the middle of the search line. 
 do we need to think differently about interacting with this file system alltogether?
+- [ ] i made a new file in one of the watched directories and it did not appear in the MagicFS
+- [ ] what happens if i want to delete a saved search?
 - [ ] **EAGAIN Handling:** Fix the "Admin Privileges" error in Dolphin by handling async delays better.
 - [ ] **Inode Stability:** Prevent "File changed on disk" errors by pinning Inode IDs to search results.
 
