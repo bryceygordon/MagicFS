@@ -262,7 +262,6 @@ impl Oracle {
             }
 
             if !candidates.is_empty() {
-                // Logging 2000 items is also slow, so truncate log output conceptually
                 if candidates.len() > 10 {
                     tracing::info!("[Oracle] 📥 Batch Inbox: {} items (First: {:?})", candidates.len(), candidates[0].1);
                 } else {
@@ -274,14 +273,12 @@ impl Oracle {
             // C. SORT BY TIME (Newest First)
             candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
-            // D. BATCH LIMITING (The Fix for Test 09)
-            // We only process the NEWEST 100 queries this tick.
-            // The rest wait for the next tick. This prevents O(N^2) explosion.
+            // D. BATCH LIMITING
             if candidates.len() > MAX_SEARCH_BATCH_SIZE {
                 candidates.truncate(MAX_SEARCH_BATCH_SIZE);
             }
 
-            // E. The Sieve
+            // E. The Sieve (Batch-Level Debouncing)
             let mut accepted_queries: Vec<(u64, String)> = Vec::new();
             let mut pruned_count = 0;
 
@@ -291,7 +288,7 @@ impl Oracle {
                 });
 
                 if is_obsolete {
-                    tracing::debug!("[Oracle] 👻 Ghost Busting: Pruning obsolete intent '{}' (ID: {})", query, inode);
+                    tracing::debug!("[Oracle] 👻 Ghost Busting (Sieve): Pruning obsolete intent '{}' (ID: {})", query, inode);
                     {
                         let state_guard = state.read().unwrap();
                         state_guard.inode_store.prune_inode(inode);
@@ -313,6 +310,33 @@ impl Oracle {
                     Ok(p) => p,
                     Err(_) => break, // Searcher saturated, try next tick
                 };
+
+                // --- RETROACTIVE CLEANUP (Highlander Mode) ---
+                // Even if the batch was small (e.g. 1 item), we must check 
+                // ALL existing directories to see if we are superseding them.
+                // This cleans up the "Typewriter Trail" in File Managers (ranger, range, rang...).
+                {
+                    // Get thread-safe handle
+                    let inode_store = state.read().unwrap().inode_store.clone();
+                    
+                    // 1. Find victims (Read Lock)
+                    let victims: Vec<u64> = inode_store.active_queries()
+                        .iter()
+                        .filter(|(other_id, other_q)| {
+                            *other_id != inode && are_related_queries(&query, other_q)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+
+                    // 2. Kill victims (Write Lock acquired per call)
+                    if !victims.is_empty() {
+                         tracing::info!("[Oracle] 🧹 Cleaning up {} stale relatives for '{}'", victims.len(), query);
+                         for vid in victims {
+                             inode_store.prune_inode(vid);
+                         }
+                    }
+                }
+                // ---------------------------------------------
 
                 tracing::info!("[Oracle] Dispatching search for: '{}'", query);
                 processed_queries.put(query.clone(), ());

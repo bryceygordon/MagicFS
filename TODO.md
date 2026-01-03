@@ -12,6 +12,7 @@
 **Goal:** Make the interaction feel "native" and stop the "Admin Privileges" errors.
 - [x] **Search Debouncing / Overrides:** - *Discussion Needed:* How to handle "Typewriter" searching (r -> re -> rec). 
     - *Ideas:* Cancel stale searches? Minimum char limit? 
+- [ ] the above typwriter task is fixed though there remains an issue. when interacting with a directory within dolhpin, if i right mouse all of the options (.zip, .tar etc) load as searches. so i am thinking is it worth revisiting this behaviour all together. i think there is benefit to having solved the typwriter fault, but it probably speaks to a bigger issue in that a lot of general interaction with the file system is triggering noise searches. even .hidden is a search.    
 - [ ] **EAGAIN Handling:** Fix the "Admin Privileges" error in Dolphin by handling async delays better.
 - [ ] **Inode Stability:** Prevent "File changed on disk" errors by pinning Inode IDs to search results.
 
