@@ -46,6 +46,20 @@ impl HollowDrive {
         }
         None
     }
+
+    // NEW HELPER: Clean up shell artifacts
+    fn sanitize_query(name: &str) -> String {
+        let trimmed = name.trim();
+        // Strip surrounding double quotes
+        if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+            return trimmed[1..trimmed.len()-1].to_string();
+        }
+        // Strip surrounding single quotes
+        if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+            return trimmed[1..trimmed.len()-1].to_string();
+        }
+        trimmed.to_string()
+    }
 }
 
 impl Filesystem for HollowDrive {
@@ -55,12 +69,15 @@ impl Filesystem for HollowDrive {
     }
 
     fn lookup(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: ReplyEntry) {
-        let name_str = match name.to_str() {
+        let raw_name = match name.to_str() {
             Some(s) => s,
             None => { reply.error(libc::EINVAL); return; }
         };
 
-        // STABLE TIME: Use the daemon start time for entries
+        // APPLY SANITIZATION IMMEDIATELY
+        let name_str_owned = Self::sanitize_query(raw_name);
+        let name_str = name_str_owned.as_str();
+
         let stable_time = self.state.read().unwrap().start_time;
         let ttl = Duration::from_secs(1);
         
@@ -240,7 +257,6 @@ impl Filesystem for HollowDrive {
         reply.attr(&ttl, &attr);
     }
 
-    // ... [setattr, readdir, open, read, write SAME AS PREVIOUS] ...
     fn setattr(
         &mut self,
         _req: &Request,
@@ -408,8 +424,8 @@ impl Filesystem for HollowDrive {
                     drop(state_guard);
                     for (i, (ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
                         if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
-                     }
-                     reply.ok(); return;
+                    }
+                    reply.ok(); return;
                 }
             } else {
                 if let Some(results) = state_guard.inode_store.get_results(ino) {

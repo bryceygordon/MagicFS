@@ -19,7 +19,6 @@ const MAX_CONCURRENT_INDEXERS: usize = 2;
 const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
 // Performance: Maximum number of pending search queries to debounce per tick.
-// Prevents O(N^2) CPU explosion during flood attacks.
 const MAX_SEARCH_BATCH_SIZE: usize = 100; 
 
 /// Helper: Checks if two strings are "related" (one is a prefix of the other).
@@ -284,15 +283,12 @@ impl Oracle {
                         state_guard.inode_store.prune_inode(inode);
 
                         // --- NEW: NOTIFY WAITER ON PRUNE ---
-                        // If we prune a query because it's obsolete (e.g., user typed "magic" then "magicfs"),
-                        // and there is a thread waiting on "magic", we must wake it up so it doesn't timeout.
                         let mut waiters = state_guard.search_waiters.lock().unwrap();
                         if let Some(waiter) = waiters.remove(&inode) {
                             let mut finished = waiter.finished.lock().unwrap();
-                            *finished = true; // Mark as done (even though empty/pruned)
+                            *finished = true; 
                             waiter.cvar.notify_all();
                         }
-                        // -----------------------------------
                     }
                 } else {
                     accepted_queries.push((inode, query));
@@ -307,25 +303,9 @@ impl Oracle {
                     Err(_) => break, // Searcher saturated, try next tick
                 };
 
-                // --- RETROACTIVE CLEANUP (Highlander Mode) ---
-                {
-                    let inode_store = state.read().unwrap().inode_store.clone();
-                    
-                    let victims: Vec<u64> = inode_store.active_queries()
-                        .iter()
-                        .filter(|(other_id, other_q)| {
-                            *other_id != inode && are_related_queries(&query, other_q)
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
-
-                    if !victims.is_empty() {
-                         tracing::info!("[Oracle] 🧹 Cleaning up {} stale relatives for '{}'", victims.len(), query);
-                         for vid in victims {
-                             inode_store.prune_inode(vid);
-                         }
-                    }
-                }
+                // --- HIGHLANDER MODE REMOVED (Peaceful Coexistence) ---
+                // We no longer retroactively prune ancestors or descendants.
+                // ------------------------------------------------------
 
                 tracing::info!("[Oracle] Dispatching search for: '{}'", query);
                 processed_queries.put(query.clone(), ());
@@ -339,8 +319,6 @@ impl Oracle {
 
                     // --- NEW: NOTIFY WAITER ---
                     // "Ring the Bell"
-                    // The Searcher has finished writing results to the InodeStore.
-                    // We now wake up the FUSE thread waiting in readdir.
                     let state_guard = state_ref.read().unwrap();
                     let mut waiters = state_guard.search_waiters.lock().unwrap();
                     

@@ -25,11 +25,17 @@ rm -f "$LOG_FILE"
 touch "$LOG_FILE"
 chmod 666 "$LOG_FILE"
 
+# --- CONFIGURATION (MATCHING MAIN.RS) ---
+MOUNT_POINT="/tmp/magicfs-test-mount"
+WATCH_DIR="/tmp/magicfs-test-data"
+# FIX: Use the correct Nomic DB path
+DB_PATH="/tmp/.magicfs_nomic/index.db" 
+
 # Cleanup
 sudo pkill -9 -x magicfs 2>/dev/null
-sudo umount -l "/tmp/magicfs-test-mount" 2>/dev/null
-sudo rm -rf "/tmp/magicfs-test-mount" "/tmp/magicfs-test-data" "/tmp/.magicfs"
-mkdir -p "/tmp/magicfs-test-mount" "/tmp/magicfs-test-data"
+sudo umount -l "$MOUNT_POINT" 2>/dev/null
+sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" "/tmp/.magicfs" "/tmp/.magicfs_nomic"
+mkdir -p "$MOUNT_POINT" "$WATCH_DIR"
 
 # Build
 cargo build --quiet
@@ -37,7 +43,7 @@ cargo build --quiet
 # Start Daemon
 # -E preserves RUST_LOG
 export RUST_LOG=debug 
-sudo -E nohup ./target/debug/magicfs "/tmp/magicfs-test-mount" "/tmp/magicfs-test-data" > "$LOG_FILE" 2>&1 &
+sudo -E nohup ./target/debug/magicfs "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
 DAEMON_PID=$!
 sleep 2
 
@@ -53,4 +59,5 @@ fi
 # Run Test
 export PYTHONPATH=$(pwd)/tests
 export MAGICFS_LOG_FILE="$LOG_FILE" # Tell Python where to look
-python3 -u "$TEST_FILE" "/tmp/.magicfs/index.db" "/tmp/magicfs-test-mount" "/tmp/magicfs-test-data"
+# FIX: Pass the correct DB_PATH
+python3 -u "$TEST_FILE" "$DB_PATH" "$MOUNT_POINT" "$WATCH_DIR"
