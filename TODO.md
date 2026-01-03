@@ -10,7 +10,7 @@
 
 ## 🚀 Phase 11: The "Snap" & "Flow" (UX Refinement)
 **Goal:** Make the interaction feel "native" and stop the "Admin Privileges" errors.
-- [ ] **Search Debouncing / Overrides:** - *Discussion Needed:* How to handle "Typewriter" searching (r -> re -> rec). 
+- [x] **Search Debouncing / Overrides:** - *Discussion Needed:* How to handle "Typewriter" searching (r -> re -> rec). 
     - *Ideas:* Cancel stale searches? Minimum char limit? 
 - [ ] **EAGAIN Handling:** Fix the "Admin Privileges" error in Dolphin by handling async delays better.
 - [ ] **Inode Stability:** Prevent "File changed on disk" errors by pinning Inode IDs to search results.

@@ -18,6 +18,11 @@ use std::collections::HashSet;
 const MAX_CONCURRENT_INDEXERS: usize = 2;
 const MAX_CONCURRENT_SEARCHERS: usize = 2;
 
+/// Helper: Checks if 'needle' is a prefix of 'haystack'.
+fn is_prefix(needle: &str, haystack: &str) -> bool {
+    haystack.starts_with(needle) && haystack != needle
+}
+
 /// Helper: Checks if two strings are "related" (one is a prefix of the other).
 /// Returns true if `a` starts with `b` OR `b` starts with `a`.
 fn are_related_queries(a: &str, b: &str) -> bool {
@@ -233,12 +238,11 @@ impl Oracle {
             };
 
             if has_candidates {
-                // Wait 20ms to allow "Typewriter Bursts" to accumulate in the FUSE buffer.
+                // Wait 20ms to allow "Typewriter Bursts" to accumulate
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
 
             // Step A: Gather candidates
-            // IMPORTANT: We need them ordered by Recency.
             let candidates: Vec<(String, u64)> = {
                 let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into())).unwrap();
                 let inode_store = &state_guard.inode_store;
@@ -259,12 +263,6 @@ impl Oracle {
                 tracing::info!("[Oracle] 📥 Batch Inbox: {:?}", raw_list);
             }
 
-            // [FIXED] Removed .reverse().
-            // We suspect iter() returns [MRU ... LRU] or [LRU ... MRU]?
-            // Logging "Raw Order" above will confirm this definitively.
-            // If Raw Order is [mag, ..., magicfs], then MRU is first. 
-            // In that case, iterating forward without reverse is correct.
-
             // Step B: Time-Aware Debouncing (Latest Wins)
             
             let mut queries_to_process = Vec::new();
@@ -273,11 +271,21 @@ impl Oracle {
 
             for (query, inode) in candidates.into_iter() {
                 // Check if this query is "related" to any query we have ALREADY accepted (which is NEWER).
+                // If "magicfs" is accepted, and we see "magic", we drop "magic". (Typing)
+                // If "mag" is accepted, and we see "magic", we drop "magic". (Backspacing)
+                
                 let is_stale = pending_accepted.iter().any(|accepted| are_related_queries(&query, accepted));
 
                 if is_stale {
-                    tracing::debug!("[Oracle] Debounced stale query: '{}'", query);
-                    processed_queries.put(query.clone(), ());
+                    tracing::debug!("[Oracle] 👻 Ghost Busting: Removing stale inode for '{}'", query);
+                    
+                    // CLEANUP: We don't just ignore it, we DELETE it from the file system view.
+                    {
+                        let state_guard = state.read().unwrap();
+                        state_guard.inode_store.prune_inode(inode);
+                    }
+                    // CRITICAL: Do NOT add to processed_queries. 
+                    // If user backspaces to it later, it must be treated as new.
                     suppressed_count += 1;
                 } else {
                     queries_to_process.push((query.clone(), inode));
@@ -286,7 +294,7 @@ impl Oracle {
             }
             
             if suppressed_count > 0 {
-                tracing::info!("[Oracle] Debounced {} intermediate queries.", suppressed_count);
+                tracing::info!("[Oracle] Debounced and pruned {} intermediate queries.", suppressed_count);
             }
 
             // Limit concurrency

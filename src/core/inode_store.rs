@@ -1,113 +1,187 @@
 // FILE: src/core/inode_store.rs
+use std::collections::{HashMap, BTreeMap};
+use std::sync::RwLock; // [FIXED] Removed unused 'Arc'
+use std::time::{SystemTime, UNIX_EPOCH};
 use crate::state::SearchResult;
-use lru::LruCache;
-use std::sync::Mutex;
-use std::num::NonZeroUsize;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
-// SAFETY: Cap active queries to 1000.
-const QUERY_CACHE_CAPACITY: usize = 1000;
-const RESULTS_CACHE_CAPACITY: usize = 50;
-// NEW: Cap mirror paths to 5000 to allow deep browsing without OOM
-const MIRROR_CACHE_CAPACITY: usize = 5000;
-
-/// InodeStore: The Authority on "What exists in the filesystem"
-#[derive(Debug)]
-pub struct InodeStore {
-    /// Forward mapping: Query String -> Inode
-    query_cache: Mutex<LruCache<String, u64>>,
-    
-    /// Reverse mapping: Inode -> Query String
-    inode_cache: Mutex<LruCache<u64, String>>,
-
-    /// Storage: Inode -> Search Results
-    results: Mutex<LruCache<u64, Vec<SearchResult>>>,
-
-    /// NEW: Mapping Inode -> Real Absolute Path (for Mirror Mode)
-    mirror_map: Mutex<LruCache<u64, String>>,
+#[derive(Debug, Clone)]
+pub struct Inode {
+    pub id: u64,
+    pub query: String,
+    pub parent: u64,
+    pub is_dir: bool,
+    pub children: Vec<u64>,
+    pub results: Option<Vec<SearchResult>>,
+    pub created_at: u64,
 }
 
-impl Default for InodeStore {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct InodeStore {
+    // Maps Query String -> Inode ID
+    queries: RwLock<HashMap<String, u64>>,
+    
+    // Maps Inode ID -> Inode Data
+    inodes: RwLock<BTreeMap<u64, Inode>>,
+    
+    // Counter for new dynamic inodes
+    next_inode: RwLock<u64>,
+
+    // [RESTORED] Maps Inode ID -> Real File Path (for Mirror Mode)
+    mirror_paths: RwLock<HashMap<u64, String>>,
 }
 
 impl InodeStore {
     pub fn new() -> Self {
+        let mut inodes = BTreeMap::new();
+        
+        // Create Root Inode (1)
+        inodes.insert(1, Inode {
+            id: 1,
+            query: "".to_string(),
+            parent: 1,
+            is_dir: true,
+            children: Vec::new(),
+            results: None,
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        });
+
         Self {
-            query_cache: Mutex::new(LruCache::new(NonZeroUsize::new(QUERY_CACHE_CAPACITY).unwrap())),
-            inode_cache: Mutex::new(LruCache::new(NonZeroUsize::new(QUERY_CACHE_CAPACITY).unwrap())),
-            results: Mutex::new(LruCache::new(NonZeroUsize::new(RESULTS_CACHE_CAPACITY).unwrap())),
-            mirror_map: Mutex::new(LruCache::new(NonZeroUsize::new(MIRROR_CACHE_CAPACITY).unwrap())),
+            queries: RwLock::new(HashMap::new()),
+            inodes: RwLock::new(inodes),
+            next_inode: RwLock::new(2),
+            mirror_paths: RwLock::new(HashMap::new()),
         }
     }
 
-    // ... [Keep existing query methods: get_or_create_inode, get_query, get_results, put_results, has_results, clear_results, active_queries] ...
-    
     pub fn get_or_create_inode(&self, query: &str) -> u64 {
+        // Fast path: Check existence
         {
-            let mut q_cache = self.query_cache.lock().unwrap();
-            if let Some(inode) = q_cache.get(query) { return *inode; }
+            let map = self.queries.read().unwrap();
+            if let Some(&id) = map.get(query) {
+                return id;
+            }
         }
-        let inode = self.hash_to_inode(query);
-        {
-            let mut q_cache = self.query_cache.lock().unwrap();
-            let mut i_cache = self.inode_cache.lock().unwrap();
-            q_cache.put(query.to_string(), inode);
-            i_cache.put(inode, query.to_string());
+
+        // Slow path: Create new
+        let mut map = self.queries.write().unwrap();
+        let mut inodes = self.inodes.write().unwrap();
+        let mut next = self.next_inode.write().unwrap();
+
+        // Double check after lock
+        if let Some(&id) = map.get(query) {
+            return id;
         }
-        inode
+
+        let id = *next;
+        *next += 1;
+
+        // Register Inode
+        inodes.insert(id, Inode {
+            id,
+            query: query.to_string(),
+            parent: 1, // All search queries are children of Root
+            is_dir: true,
+            children: Vec::new(),
+            results: None,
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        });
+
+        map.insert(query.to_string(), id);
+
+        // Add to Root's children
+        if let Some(root) = inodes.get_mut(&1) {
+            root.children.push(id);
+        }
+
+        id
     }
 
+    pub fn get_inode(&self, inode: u64) -> Option<Inode> {
+        self.inodes.read().unwrap().get(&inode).cloned()
+    }
+
+    // [RESTORED]
     pub fn get_query(&self, inode: u64) -> Option<String> {
-        let mut cache = self.inode_cache.lock().unwrap();
-        cache.get(&inode).cloned()
+        self.inodes.read().unwrap().get(&inode).map(|n| n.query.clone())
     }
 
+    // [RESTORED]
     pub fn get_results(&self, inode: u64) -> Option<Vec<SearchResult>> {
-        let mut cache = self.results.lock().unwrap();
-        cache.get(&inode).cloned()
+        self.inodes.read().unwrap().get(&inode).and_then(|n| n.results.clone())
     }
 
     pub fn put_results(&self, inode: u64, results: Vec<SearchResult>) {
-        let mut cache = self.results.lock().unwrap();
-        cache.put(inode, results);
+        let mut inodes = self.inodes.write().unwrap();
+        if let Some(node) = inodes.get_mut(&inode) {
+            node.results = Some(results);
+        }
     }
 
     pub fn has_results(&self, inode: u64) -> bool {
-        let cache = self.results.lock().unwrap();
-        cache.contains(&inode)
+        let inodes = self.inodes.read().unwrap();
+        if let Some(node) = inodes.get(&inode) {
+            return node.results.is_some();
+        }
+        false
+    }
+
+    // [RESTORED] Deterministic hashing for file mapping
+    pub fn hash_to_inode(&self, key: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        // Ensure it doesn't collide with reserved inodes (0, 1) or small counters
+        // We use the top bit or a large offset to separate these from sequential IDs if needed.
+        // For simplicity in this mock, we just use the hash directly but ensure it's > 100000.
+        hasher.finish().saturating_add(100000)
+    }
+
+    // [RESTORED] Mirror Path Management
+    pub fn put_mirror_path(&self, inode: u64, path: String) {
+        self.mirror_paths.write().unwrap().insert(inode, path);
+    }
+
+    // [RESTORED]
+    pub fn get_mirror_path(&self, inode: u64) -> Option<String> {
+        self.mirror_paths.read().unwrap().get(&inode).cloned()
+    }
+
+    /// Returns a snapshot of active queries (Query, InodeID)
+    /// Used by Oracle to find work.
+    pub fn active_queries(&self) -> Vec<(u64, String)> {
+        let inodes = self.inodes.read().unwrap();
+        inodes.values()
+            .filter(|n| n.id > 1 && n.is_dir) // Skip root and files
+            .map(|n| (n.id, n.query.clone()))
+            .collect()
     }
 
     pub fn clear_results(&self) {
-        let mut cache = self.results.lock().unwrap();
-        cache.clear();
+        let mut inodes = self.inodes.write().unwrap();
+        for node in inodes.values_mut() {
+            if node.id > 1 {
+                node.results = None;
+            }
+        }
     }
 
-    pub fn active_queries(&self) -> Vec<(u64, String)> {
-        let cache = self.query_cache.lock().unwrap();
-        cache.iter().map(|(k, v)| (*v, k.clone())).collect()
-    }
+    // --- Ghost Busting (Debouncing) ---
+    pub fn prune_inode(&self, inode: u64) {
+        if inode <= 1 { return; } // Protect Root
 
-    // --- NEW: Mirror Mode Methods ---
+        let mut inodes = self.inodes.write().unwrap();
+        let mut queries = self.queries.write().unwrap();
 
-    pub fn put_mirror_path(&self, inode: u64, path: String) {
-        let mut cache = self.mirror_map.lock().unwrap();
-        cache.put(inode, path);
-    }
+        if let Some(node) = inodes.remove(&inode) {
+            // 1. Remove from Query Map
+            queries.remove(&node.query);
 
-    pub fn get_mirror_path(&self, inode: u64) -> Option<String> {
-        let mut cache = self.mirror_map.lock().unwrap();
-        cache.get(&inode).cloned()
-    }
-
-    // --- End New Methods ---
-
-    pub fn hash_to_inode(&self, s: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        hasher.finish() | 0x8000000000000000
+            // 2. Remove from Parent's children list (Root)
+            if let Some(parent) = inodes.get_mut(&node.parent) {
+                if let Some(pos) = parent.children.iter().position(|&x| x == inode) {
+                    parent.children.swap_remove(pos);
+                }
+            }
+        }
     }
 }
