@@ -15,6 +15,9 @@ pub struct Inode {
     pub children: Vec<u64>,
     pub results: Option<Vec<SearchResult>>,
     pub created_at: u64,
+    /// NEW: Has this inode been accessed (readdir/lookup child) yet?
+    /// This prevents "Typewriter" phantom searches.
+    pub initialized: bool,
 }
 
 pub struct InodeStore {
@@ -44,12 +47,13 @@ impl InodeStore {
             children: Vec::new(),
             results: None,
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            initialized: true, // Root is always active
         });
 
         Self {
             queries: RwLock::new(HashMap::new()),
             inodes: RwLock::new(inodes),
-            // FIX: Start at 100 to avoid collision with reserved FUSE inodes (1=Root, 2=.magic, 3=search, 4=refresh, 5=mirror)
+            // Start at 100 to avoid collision with reserved FUSE inodes (1=Root, 2=.magic, 3=search, 4=refresh, 5=mirror)
             next_inode: RwLock::new(100),
             mirror_paths: RwLock::new(HashMap::new()),
         }
@@ -86,6 +90,8 @@ impl InodeStore {
             children: Vec::new(),
             results: None,
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            // NEW: Default to FALSE. We acknowledge existence, but don't search yet.
+            initialized: false,
         });
 
         map.insert(query.to_string(), id);
@@ -125,6 +131,21 @@ impl InodeStore {
         false
     }
 
+    // NEW: The Trigger Mechanism
+    // Called by FUSE when a directory is entered (readdir) or a child file is accessed.
+    pub fn mark_active(&self, inode: u64) {
+        // Protect reserved inodes
+        if inode <= 5 { return; }
+
+        let mut inodes = self.inodes.write().unwrap();
+        if let Some(node) = inodes.get_mut(&inode) {
+            if !node.initialized {
+                node.initialized = true;
+                tracing::debug!("[InodeStore] Triggered activation for Inode {} ('{}')", inode, node.query);
+            }
+        }
+    }
+
     // Deterministic hashing for file mapping (used for Mirror Mode and Search Results)
     pub fn hash_to_inode(&self, key: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -144,11 +165,13 @@ impl InodeStore {
 
     /// Returns a snapshot of active queries (InodeID, QueryString)
     /// Used by Oracle to find work.
-    /// FIX: Filter IDs > 5 to avoid picking up reserved system directories.
+    /// UPDATED: Now filters by `initialized` to support Lazy Search.
     pub fn active_queries(&self) -> Vec<(u64, String)> {
         let inodes = self.inodes.read().unwrap();
         inodes.values()
             .filter(|n| n.id > 5 && n.is_dir) 
+            // CRITICAL: Only return queries that have been TRIGGERED
+            .filter(|n| n.initialized)
             .map(|n| (n.id, n.query.clone()))
             .collect()
     }
@@ -164,7 +187,7 @@ impl InodeStore {
 
     // --- Ghost Busting (Debouncing) ---
     pub fn prune_inode(&self, inode: u64) {
-        // FIX: Protect reserved inodes (1-5)
+        // Protect reserved inodes (1-5)
         if inode <= 5 { return; } 
 
         let mut inodes = self.inodes.write().unwrap();

@@ -1,8 +1,9 @@
 // FILE: src/hollow_drive.rs
 //! Hollow Drive: The Synchronous FUSE Loop (The Face)
 
-use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyStatfs, ReplyOpen, ReplyData, ReplyWrite, Request};
+use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyOpen, ReplyData, ReplyWrite, Request};
 use crate::state::{SharedState, SearchWaiter};
+use crate::core::bouncer::Bouncer; // Import the Bouncer
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::time::{SystemTime, Duration};
@@ -47,14 +48,11 @@ impl HollowDrive {
         None
     }
 
-    // NEW HELPER: Clean up shell artifacts
     fn sanitize_query(name: &str) -> String {
         let trimmed = name.trim();
-        // Strip surrounding double quotes
         if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
             return trimmed[1..trimmed.len()-1].to_string();
         }
-        // Strip surrounding single quotes
         if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
             return trimmed[1..trimmed.len()-1].to_string();
         }
@@ -74,7 +72,6 @@ impl Filesystem for HollowDrive {
             None => { reply.error(libc::EINVAL); return; }
         };
 
-        // APPLY SANITIZATION IMMEDIATELY
         let name_str_owned = Self::sanitize_query(raw_name);
         let name_str = name_str_owned.as_str();
 
@@ -118,33 +115,27 @@ impl Filesystem for HollowDrive {
             match name_str {
                 "." | ".." => reply.entry(&ttl, &mk_attr(3, fuser::FileType::Directory, 0o555), 0),
                 _ => {
-                    // --- A. THE BOUNCER ---
-                    if name_str.starts_with(".") || 
-                       name_str.ends_with(".zip") || 
-                       name_str.ends_with(".tar") ||
-                       name_str.ends_with(".gz") ||
-                       name_str.ends_with(".ini") ||
-                       name_str.ends_with(".desktop") ||
-                       name_str.starts_with("New Folder") {
+                    // --- A. THE BOUNCER (Centralized Policy) ---
+                    if Bouncer::is_noise(name_str) {
                         tracing::debug!("[HollowDrive] Bouncer rejected: {}", name_str);
                         reply.error(libc::ENOENT);
                         return;
                     }
 
-                    // --- B. THE EPHEMERAL PROMISE ---
+                    // --- B. THE LAZY PROMISE ---
                     let query = name_str.to_string();
                     let state_guard = self.state.read().unwrap();
                     let inode = state_guard.inode_store.get_or_create_inode(&query);
                     drop(state_guard);
 
-                    // Return with STABLE time
+                    // NOTE: Lazy Loading. No activation yet.
                     reply.entry(&ttl, &mk_attr(inode, fuser::FileType::Directory, 0o555), 0);
                 }
             }
             return;
         }
 
-        // 4. Mirror Root (Inode 5)
+        // 4. Mirror Root
         if parent == 5 {
              if name_str == "." || name_str == ".." {
                 reply.entry(&ttl, &mk_attr(5, fuser::FileType::Directory, 0o755), 0); return;
@@ -166,20 +157,23 @@ impl Filesystem for HollowDrive {
             reply.error(libc::ENOENT); return;
         }
 
-        // 5. Dynamic Content
+        // 5. Dynamic Content (Trigger on File Access)
         if parent > 5 {
             let state_guard = self.state.read().unwrap();
             let inode_store = &state_guard.inode_store;
 
-            // Search Query -> Result File
             if inode_store.get_query(parent).is_some() {
+                drop(state_guard);
+                // Trigger Lazy Search
+                self.state.read().unwrap().inode_store.mark_active(parent);
+                
+                let state_guard = self.state.read().unwrap();
+                let inode_store = &state_guard.inode_store;
                 let file_inode = inode_store.hash_to_inode(&format!("{}-{}", parent, name_str));
-                // Files are Read-Write (Passthrough)
                 reply.entry(&ttl, &mk_attr(file_inode, fuser::FileType::RegularFile, 0o644), 0);
                 return;
             }
             
-            // Mirror Path -> Child
             if let Some(parent_path) = inode_store.get_mirror_path(parent) {
                 let child_path = Path::new(&parent_path).join(name_str);
                 let child_path_str = child_path.to_string_lossy().to_string();
@@ -189,15 +183,12 @@ impl Filesystem for HollowDrive {
                 if let Ok(meta) = std::fs::metadata(&child_path) {
                     let kind = if meta.is_dir() { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
                     let perm = if meta.is_dir() { 0o755 } else { 0o644 };
-                    
-                    // REAL files get REAL timestamps
                     let mut attr = mk_attr(child_inode, kind, perm);
                     attr.size = meta.len();
                     attr.blocks = (attr.size + 511)/512;
                     if let Ok(m) = meta.modified() { attr.mtime = m; }
                     if let Ok(a) = meta.accessed() { attr.atime = a; }
                     if let Ok(c) = meta.created() { attr.crtime = c; }
-                    
                     reply.entry(&ttl, &attr, 0);
                 } else {
                     reply.error(libc::ENOENT);
@@ -221,21 +212,16 @@ impl Filesystem for HollowDrive {
         };
 
         match ino {
-            1 => {}, // Root (Stable)
-            2 => {}, // .magic (Stable)
-            3 => { 
-                attr.perm = 0o555; // Search Root (Stable, Read-Only)
-            },
+            1 => {}, 
+            2 => {}, 
+            3 => { attr.perm = 0o555; },
             4 => { attr.kind = fuser::FileType::RegularFile; attr.size = 0; attr.perm = 0o666; attr.nlink = 1; }, 
-            5 => {}, // Mirror (Stable)
+            5 => {}, 
             _ => {
                 let is_search_dir = self.state.read().unwrap().inode_store.get_query(ino).is_some();
                 if is_search_dir {
-                    // Search Query Dirs are STABLE and Read-Only
                     attr.perm = 0o555;
                 } else {
-                    // Everything else is a Real File (or Search Result File)
-                    // These need REAL timestamps to detect changes
                     if let Some(real_path) = self.find_real_path(ino) {
                         if let Ok(meta) = std::fs::metadata(&real_path) {
                             attr.size = meta.len();
@@ -248,7 +234,6 @@ impl Filesystem for HollowDrive {
                             if let Ok(c) = meta.created() { attr.crtime = c; }
                         }
                     } else {
-                        // Fallback for search results not yet mapped?
                         attr.kind = fuser::FileType::RegularFile; attr.size = 1024; attr.perm = 0o644; attr.nlink = 1;
                     }
                 }
@@ -323,7 +308,6 @@ impl Filesystem for HollowDrive {
             (1, FileType::Directory, "..".to_string()),
         ];
 
-        // 1. Root
         if ino == 1 {
             let mut root_entries = entries.clone();
             root_entries.extend_from_slice(&[
@@ -337,7 +321,6 @@ impl Filesystem for HollowDrive {
             reply.ok(); return;
         }
 
-        // 2. .magic
         if ino == 2 {
             let mut items = entries.clone();
             items.push((4, FileType::RegularFile, "refresh".to_string()));
@@ -347,7 +330,6 @@ impl Filesystem for HollowDrive {
             reply.ok(); return;
         }
 
-        // 3. Search Root
         if ino == 3 {
              let mut items = entries.clone();
              let state_guard = self.state.read().unwrap();
@@ -361,7 +343,6 @@ impl Filesystem for HollowDrive {
              reply.ok(); return;
         }
 
-        // 4. Mirror Root
         if ino == 5 { 
             let mut items = entries.clone();
             let paths_to_list: Vec<(u64, String)> = {
@@ -386,70 +367,54 @@ impl Filesystem for HollowDrive {
             reply.ok(); return;
         }
 
-        // 5. Dynamic: Search Results OR Mirror Subdirs
-        let state_guard = self.state.read().unwrap();
-        
-        // --- A. Search Results (SMART WAITER) ---
-        if state_guard.inode_store.get_query(ino).is_some() {
-            if !state_guard.inode_store.has_results(ino) {
-                drop(state_guard); // Release lock before waiting
+        let is_query_dir = {
+            let state_guard = self.state.read().unwrap();
+            state_guard.inode_store.get_query(ino).is_some()
+        };
 
+        if is_query_dir {
+            // TRIGGER LAZY SEARCH
+            self.state.read().unwrap().inode_store.mark_active(ino);
+            
+            let state_guard = self.state.read().unwrap();
+            if !state_guard.inode_store.has_results(ino) {
+                drop(state_guard);
                 let waiter = Arc::new(SearchWaiter::new());
                 {
                     let sg = self.state.read().unwrap();
                     let mut waiters = sg.search_waiters.lock().unwrap();
                     waiters.insert(ino, waiter.clone());
                 }
-
-                let mut finished = waiter.finished.lock().unwrap();
+                let finished = waiter.finished.lock().unwrap();
                 if !*finished {
                     let _result = waiter.cvar.wait_timeout(finished, Duration::from_millis(1000)).unwrap();
                 }
-                
-                let state_guard = self.state.read().unwrap();
-                if let Some(results) = state_guard.inode_store.get_results(ino) {
-                     let mut items = entries.clone();
-                     for result in results {
-                        let score_str = format!("{:.2}", result.score);
-                        let filename = format!("{}_{}", score_str, result.filename);
-                        let file_inode = state_guard.inode_store.hash_to_inode(&format!("{}-{}", ino, &filename));
-                        items.push((file_inode, FileType::RegularFile, filename));
-                     }
-                     drop(state_guard);
-                     for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
-                        if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
-                     }
-                     reply.ok(); return;
-                } else {
-                    drop(state_guard);
-                    for (i, (ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
-                        if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
-                    }
-                    reply.ok(); return;
-                }
-            } else {
-                if let Some(results) = state_guard.inode_store.get_results(ino) {
-                     let mut items = entries.clone();
-                     for result in results {
-                        let score_str = format!("{:.2}", result.score);
-                        let filename = format!("{}_{}", score_str, result.filename);
-                        let file_inode = state_guard.inode_store.hash_to_inode(&format!("{}-{}", ino, &filename));
-                        items.push((file_inode, FileType::RegularFile, filename));
-                     }
-                     drop(state_guard);
-                     for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
-                        if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
-                     }
-                     reply.ok(); return;
+            }
+            
+            let state_guard = self.state.read().unwrap();
+            let mut items = entries.clone();
+            if let Some(results) = state_guard.inode_store.get_results(ino) {
+                for result in results {
+                    let score_str = format!("{:.2}", result.score);
+                    let filename = format!("{}_{}", score_str, result.filename);
+                    let file_inode = state_guard.inode_store.hash_to_inode(&format!("{}-{}", ino, &filename));
+                    items.push((file_inode, FileType::RegularFile, filename));
                 }
             }
+            
+            drop(state_guard);
+            for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
+                if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
+            }
+            reply.ok(); 
+            return;
         }
 
-        // --- B. Mirror Subdirs ---
+        // Mirror Subdirs
+        let state_guard = self.state.read().unwrap();
         if let Some(real_path) = state_guard.inode_store.get_mirror_path(ino) {
             let inode_store = &state_guard.inode_store;
             let mut items = entries.clone();
-            
             let mut found_entries = Vec::new();
             if let Ok(dir_entries) = std::fs::read_dir(&real_path) {
                 for entry in dir_entries.flatten() {
@@ -472,13 +437,12 @@ impl Filesystem for HollowDrive {
             }
             reply.ok(); return;
         }
-
         reply.ok();
     }
     
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         if ino == 4 { reply.opened(0, 0); return; }
-        if let Some(real_path) = self.find_real_path(ino) {
+        if self.find_real_path(ino).is_some() {
             reply.opened(0, flags as u32); return;
         }
         reply.error(libc::ENOENT);

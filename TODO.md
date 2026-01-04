@@ -1,5 +1,8 @@
 # MagicFS Roadmap & Charter
 
+## Little jobs up first
+- [ ] lower the memory test from 2000 to 500.
+
 > "The goal is not just to search; it is to maintain the illusion of a physical, infinite drive."
 
 ## 🏆 Completed Milestones
