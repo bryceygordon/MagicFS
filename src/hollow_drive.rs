@@ -11,6 +11,7 @@ use std::time::{SystemTime, Duration};
 use std::path::Path;
 use std::sync::Arc;
 use libc;
+use rusqlite::params; // Added for DB queries
 
 // --- INODE CONSTANTS ---
 const INODE_ROOT: u64 = 1;
@@ -56,6 +57,19 @@ impl HollowDrive {
                 }
             }
         }
+        
+        // 3. Persistent Files (Tag View)
+        // If the inode matches a real file in our DB, return it.
+        // We can check the DB directly.
+        let mut conn_lock = state_guard.db_connection.lock().ok()?;
+        if let Some(conn) = conn_lock.as_mut() {
+             let mut stmt = conn.prepare("SELECT abs_path FROM file_registry WHERE inode = ?1").ok()?;
+             let path: Result<String, _> = stmt.query_row([target_inode], |r| r.get(0));
+             if let Ok(p) = path {
+                 return Some(p);
+             }
+        }
+
         None
     }
 
@@ -154,7 +168,6 @@ impl Filesystem for HollowDrive {
                     let mut conn_lock = state_guard.db_connection.lock().unwrap();
                     
                     if let Some(conn) = conn_lock.as_mut() {
-                        // Quick check: Does tag exist?
                         let mut stmt = conn.prepare("SELECT tag_id FROM tags WHERE name = ?1").unwrap();
                         let tag_id_res: std::result::Result<u64, _> = stmt.query_row([name_str], |r| r.get(0));
 
@@ -201,9 +214,52 @@ impl Filesystem for HollowDrive {
             reply.error(libc::ENOENT); return;
         }
 
-        // 7. Dynamic Content (Search Results or Mirror Children)
-        // CRITICAL FIX: Changed > 100 to >= 100 to handle the first inode (100) correctly.
+        // 7. Dynamic Content (Search Results, Mirror Children, OR PERSISTENT TAGS)
         if parent >= 100 {
+            // A. IS IT A TAG? (Persistent Inode)
+            if InodeStore::is_persistent(parent) {
+                let tag_id = InodeStore::inode_to_db_id(parent);
+                
+                let state_guard = self.state.read().unwrap();
+                let mut conn_lock = state_guard.db_connection.lock().unwrap();
+                
+                if let Some(conn) = conn_lock.as_mut() {
+                    // Look for file inside this tag
+                    let sql = "
+                        SELECT f.inode, f.size, f.mtime, f.is_dir 
+                        FROM file_tags ft 
+                        JOIN file_registry f ON ft.file_id = f.file_id 
+                        WHERE ft.tag_id = ?1 AND ft.display_name = ?2
+                    ";
+                    
+                    if let Ok(mut stmt) = conn.prepare(sql) {
+                        let row_res = stmt.query_row(params![tag_id, name_str], |row| {
+                            Ok((
+                                row.get::<_, u64>(0)?, // inode
+                                row.get::<_, u64>(1)?, // size
+                                row.get::<_, u64>(2)?, // mtime
+                                row.get::<_, i32>(3)?  // is_dir
+                            ))
+                        });
+
+                        if let Ok((inode, size, mtime, is_dir_int)) = row_res {
+                            let kind = if is_dir_int != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
+                            let perm = if is_dir_int != 0 { 0o755 } else { 0o644 };
+                            let mut attr = mk_attr(inode, kind, perm);
+                            attr.size = size;
+                            attr.blocks = (size + 511)/512;
+                            attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
+                            
+                            reply.entry(&ttl, &attr, 0);
+                            return;
+                        }
+                    }
+                }
+                reply.error(libc::ENOENT);
+                return;
+            }
+
+            // B. STANDARD DYNAMIC CONTENT
             let state_guard = self.state.read().unwrap();
             let inode_store = &state_guard.inode_store;
 
@@ -286,9 +342,9 @@ impl Filesystem for HollowDrive {
                                 if let Ok(m) = meta.modified() { attr.mtime = m; }
                                 if let Ok(a) = meta.accessed() { attr.atime = a; }
                                 if let Ok(c) = meta.created() { attr.crtime = c; }
+                            } else {
+                                attr.kind = fuser::FileType::RegularFile; attr.size = 1024; attr.perm = 0o644; attr.nlink = 1;
                             }
-                        } else {
-                            attr.kind = fuser::FileType::RegularFile; attr.size = 1024; attr.perm = 0o644; attr.nlink = 1;
                         }
                     }
                 }
@@ -467,7 +523,47 @@ impl Filesystem for HollowDrive {
             return;
         }
 
-        // Search Results & Mirror Subdirs
+        // Search Results & Mirror Subdirs & PERSISTENT TAGS
+        if InodeStore::is_persistent(ino) {
+             let tag_id = InodeStore::inode_to_db_id(ino);
+             let mut items = entries.clone();
+
+             let state_guard = self.state.read().unwrap();
+             let mut conn_lock = state_guard.db_connection.lock().unwrap();
+             
+             if let Some(conn) = conn_lock.as_mut() {
+                 let sql = "
+                    SELECT f.inode, f.is_dir, ft.display_name 
+                    FROM file_tags ft 
+                    JOIN file_registry f ON ft.file_id = f.file_id 
+                    WHERE ft.tag_id = ?1
+                 ";
+                 if let Ok(mut stmt) = conn.prepare(sql) {
+                     let rows = stmt.query_map(params![tag_id], |row| {
+                         Ok((
+                             row.get::<_, u64>(0)?, 
+                             row.get::<_, i32>(1)?, 
+                             row.get::<_, String>(2)?
+                         ))
+                     }).unwrap();
+                     
+                     for row in rows {
+                         if let Ok((inode, is_dir_int, name)) = row {
+                             let kind = if is_dir_int != 0 { FileType::Directory } else { FileType::RegularFile };
+                             items.push((inode, kind, name));
+                         }
+                     }
+                 }
+             }
+             
+             for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
+                if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
+            }
+            reply.ok();
+            return;
+        }
+
+        // Dynamic Content (Search)
         if !InodeStore::is_persistent(ino) {
             let is_query_dir = {
                 let state_guard = self.state.read().unwrap();
