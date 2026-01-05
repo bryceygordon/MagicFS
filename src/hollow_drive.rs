@@ -1,12 +1,12 @@
 // FILE: src/hollow_drive.rs
 //! Hollow Drive: The Synchronous FUSE Loop (The Face)
 
-use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyOpen, ReplyData, ReplyWrite, Request};
+use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyOpen, ReplyData, ReplyWrite, ReplyCreate, Request};
 use crate::state::{SharedState, SearchWaiter};
 use crate::core::bouncer::Bouncer;
 use crate::core::inode_store::InodeStore;
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt}; // Added MetadataExt for .ino()
 use std::time::{SystemTime, Duration};
 use std::path::Path;
 use std::sync::Arc;
@@ -880,5 +880,142 @@ impl Filesystem for HollowDrive {
         } else {
             reply.error(libc::EIO);
         }
+    }
+
+    // --- NEW: CREATE HANDLER (IMPORT) ---
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        _mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        // 1. Check Context: Must be a Persistent Tag
+        if !InodeStore::is_persistent(parent) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => { reply.error(libc::EINVAL); return; }
+        };
+
+        // 2. Determine Landing Zone
+        // We use the first watched path as the default landing zone.
+        let landing_root = {
+            let state_guard = self.state.read().unwrap();
+            let wp = state_guard.watch_paths.lock().unwrap();
+            if wp.is_empty() {
+                reply.error(libc::ENOSPC); // No storage defined
+                return;
+            }
+            wp[0].clone()
+        };
+
+        let import_dir = Path::new(&landing_root).join("_imported");
+        if !import_dir.exists() {
+            if let Err(_) = std::fs::create_dir_all(&import_dir) {
+                reply.error(libc::EIO); return;
+            }
+        }
+
+        // 3. Physical Creation
+        let physical_path = import_dir.join(name_str);
+        let physical_path_str = physical_path.to_string_lossy().to_string();
+
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&physical_path) 
+        {
+            Ok(f) => f,
+            Err(e) => {
+                let err = match e.kind() {
+                    std::io::ErrorKind::PermissionDenied => libc::EACCES,
+                    _ => libc::EIO,
+                };
+                reply.error(err);
+                return;
+            }
+        };
+
+        // 4. Get Metadata (Inode)
+        let meta = match file.metadata() {
+            Ok(m) => m,
+            Err(_) => { reply.error(libc::EIO); return; }
+        };
+        
+        let physical_inode = meta.ino();
+        let mtime = meta.modified().unwrap_or(SystemTime::now())
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+        // 5. Database Registration
+        let tag_id = InodeStore::inode_to_db_id(parent);
+        
+        let state_guard = self.state.read().unwrap();
+        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+        if let Some(conn) = conn_lock.as_mut() {
+            let tx = match conn.transaction() {
+                Ok(t) => t,
+                Err(_) => { reply.error(libc::EIO); return; }
+            };
+
+            // A. Register File
+            let file_id_res = tx.query_row(
+                "INSERT INTO file_registry (abs_path, inode, mtime, size, is_dir) 
+                 VALUES (?1, ?2, ?3, 0, 0)
+                 ON CONFLICT(abs_path) DO UPDATE SET inode=excluded.inode, mtime=excluded.mtime
+                 RETURNING file_id",
+                params![physical_path_str, physical_inode, mtime],
+                |r| r.get::<_, u64>(0)
+            );
+
+            let file_id = match file_id_res {
+                Ok(id) => id,
+                Err(_) => { reply.error(libc::EIO); return; }
+            };
+
+            // B. Link to Tag
+            if let Err(_) = tx.execute(
+                "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
+                params![file_id, tag_id, name_str]
+            ) {
+                // Ignore conflict if it exists
+            }
+
+            if let Err(_) = tx.commit() {
+                reply.error(libc::EIO); return;
+            }
+        } else {
+            reply.error(libc::EIO); return;
+        }
+
+        // 6. Reply
+        let attr = fuser::FileAttr {
+            ino: physical_inode,
+            size: 0,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: fuser::FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: 1000, 
+            gid: 1000, 
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        reply.created(&Duration::from_secs(1), &attr, 0, 0, flags as u32);
     }
 }

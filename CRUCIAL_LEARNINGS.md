@@ -109,3 +109,11 @@
 * **Why:** When the daemon (running as `root`) enables WAL mode, it creates `-shm` and `-wal` shared memory files owned by `root`.
 * **Failure:** User-level scripts (like our test suite) cannot query the database, even if the main `.db` file has wide permissions, because they cannot attach to the shared memory.
 * **Decision:** Integration tests that need to inspect/modify the live database must use `sudo sqlite3` or run as the same user as the daemon.
+
+### 20. The Landing Zone Pattern (Virtual Creation)
+* **Why:** You cannot "write" bytes to a SQL query. When a user runs `cp file.txt /magic/tags/foo/`, the kernel needs a physical inode to write to.
+* **Decision:** `create()` in a Tag View performs three atomic actions:
+    1. Creates a physical file in `~/[WatchDir]/_imported/`.
+    2. Registers the file in the `file_registry`.
+    3. Links the file to the active Tag ID in `file_tags`.
+* **Result:** The kernel gets a real inode, so subsequent `write()` calls pass through naturally to the physical disk.

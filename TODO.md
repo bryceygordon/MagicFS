@@ -36,7 +36,7 @@
 - [x] **Collision Resolution:** Implement the "Smart Contextual Aliasing" logic (Tag/Origin suffixes) for duplicate filenames in a view.
 
 ### 4. Semantic Operations (Write)
-- [ ] **Tagging (CP):** Implement `create/link` logic to insert into `file_tags`.
+- [x] **Tagging (CP):** Implement `create/link` logic to insert into `file_tags`.
 - [x] **Retagging (MV):** Implement `rename` logic to update `tag_id`.
 - [x] **Aliasing (MV):** Implement `rename` logic to update `display_name` when source dir == dest dir.
 - [ ] **The Wastebin:** Implement `@trash` tag logic and override queries to hide trashed items.
