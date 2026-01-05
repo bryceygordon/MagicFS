@@ -104,3 +104,8 @@
 * **Why:** Linux filesystems store `mtime` with nanosecond precision. SQLite stores it as seconds (INTEGER).
 * **Failure:** When checking `if fs_mtime > db_mtime`, a file modified at `100.5s` looks newer than the DB record of `100s`, causing infinite re-indexing loops on startup.
 * **Decision:** The Librarian must allow a **1-second epsilon (drift)** when comparing timestamps. `abs(fs_mtime - db_mtime) > 1`.
+
+### 19. The SQLite Permission Wall (WAL Mode)
+* **Why:** When the daemon (running as `root`) enables WAL mode, it creates `-shm` and `-wal` shared memory files owned by `root`.
+* **Failure:** User-level scripts (like our test suite) cannot query the database, even if the main `.db` file has wide permissions, because they cannot attach to the shared memory.
+* **Decision:** Integration tests that need to inspect/modify the live database must use `sudo sqlite3` or run as the same user as the daemon.

@@ -690,4 +690,96 @@ impl Filesystem for HollowDrive {
          }
          reply.error(libc::ENOENT);
     }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        newparent: u64,
+        newname: &std::ffi::OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        // 1. Sanity Check: We only support renaming/moving within the Tag System for now.
+        if !InodeStore::is_persistent(parent) || !InodeStore::is_persistent(newparent) {
+            reply.error(libc::EXDEV); // "Cross-device link"
+            return;
+        }
+
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => { reply.error(libc::EINVAL); return; }
+        };
+        
+        let newname_str = match newname.to_str() {
+            Some(s) => s,
+            None => { reply.error(libc::EINVAL); return; }
+        };
+
+        let source_tag_id = InodeStore::inode_to_db_id(parent);
+        let dest_tag_id = InodeStore::inode_to_db_id(newparent);
+
+        let state_guard = self.state.read().unwrap();
+        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+        if let Some(conn) = conn_lock.as_mut() {
+            let tx = match conn.transaction() {
+                Ok(t) => t,
+                Err(_) => { reply.error(libc::EIO); return; }
+            };
+
+            // 2. Resolve File ID
+            let file_id_res: std::result::Result<u64, _> = tx.query_row(
+                "SELECT file_id FROM file_tags WHERE tag_id = ?1 AND display_name = ?2",
+                params![source_tag_id, name_str],
+                |r| r.get(0)
+            );
+
+            let file_id = match file_id_res {
+                Ok(id) => id,
+                Err(_) => { 
+                    reply.error(libc::ENOENT); 
+                    return; 
+                }
+            };
+
+            // 3. Perform Operation
+            if source_tag_id == dest_tag_id {
+                // CASE A: RENAME (Same Folder)
+                match tx.execute(
+                    "UPDATE file_tags SET display_name = ?1 WHERE file_id = ?2 AND tag_id = ?3",
+                    params![newname_str, file_id, source_tag_id]
+                ) {
+                    Ok(_) => {},
+                    Err(_) => { reply.error(libc::EIO); return; }
+                }
+            } else {
+                // CASE B: MOVE (Retagging)
+                // 1. Remove old link
+                if let Err(_) = tx.execute(
+                    "DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2",
+                    params![file_id, source_tag_id]
+                ) {
+                    reply.error(libc::EIO); return;
+                }
+
+                // 2. Add new link
+                if let Err(_) = tx.execute(
+                    "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
+                    params![file_id, dest_tag_id, newname_str]
+                ) {
+                     reply.error(libc::EEXIST); return;
+                }
+            }
+
+            if let Ok(_) = tx.commit() {
+                reply.ok();
+            } else {
+                reply.error(libc::EIO);
+            }
+        } else {
+            reply.error(libc::EIO);
+        }
+    }
 }
