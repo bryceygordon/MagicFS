@@ -15,6 +15,7 @@ impl<'a> Repository<'a> {
     }
 
     pub fn initialize(&self) -> Result<()> {
+        // 1. Core File Registry (The Warehouse)
         self.conn.execute_batch(r#"
             CREATE TABLE IF NOT EXISTS file_registry (
                 file_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +29,7 @@ impl<'a> Repository<'a> {
             );
         "#).map_err(MagicError::Database)?;
 
+        // 2. Vector Index (Nomic Embed v1.5 / Snowflake Arctic)
         let has_vec_index: i32 = self.conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE name='vec_index'", 
             [], 
@@ -35,7 +37,6 @@ impl<'a> Repository<'a> {
         ).unwrap_or(0);
 
         if has_vec_index == 0 {
-             // Snowflake Arctic Medium (768 Dimensions) / Nomic v1.5
              match self.conn.execute_batch(r#"
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0(
                     file_id INTEGER,
@@ -46,6 +47,44 @@ impl<'a> Repository<'a> {
                 Err(e) => tracing::warn!("[Repository] Failed to create vec_index: {}", e),
             }
         }
+
+        // 3. Taxonomy (Tags/Folders)
+        // Represents the folder structure under /magic/tags
+        self.conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS tags (
+                tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_tag_id INTEGER,
+                name TEXT NOT NULL,
+                color TEXT,
+                icon TEXT,
+                
+                UNIQUE(parent_tag_id, name),
+                FOREIGN KEY(parent_tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE
+            );
+        "#).map_err(MagicError::Database)?;
+
+        // 4. The Graph (File <-> Tag Edges)
+        // This allows the "Multiverse": One file, multiple locations/names.
+        self.conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS file_tags (
+                file_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                
+                -- The Multiverse: A file can have a different name in this specific tag view
+                display_name TEXT, 
+                
+                added_at INTEGER DEFAULT (unixepoch()),
+                
+                PRIMARY KEY (file_id, tag_id),
+                FOREIGN KEY (file_id) REFERENCES file_registry(file_id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE
+            );
+        "#).map_err(MagicError::Database)?;
+
+        // 5. Default Tags (Inbox, Trash)
+        // We reserve low IDs for system tags if needed, or handle via name.
+        // For now, ensure standard structure exists? No, do lazily in logic.
+
         Ok(())
     }
 

@@ -6,6 +6,13 @@ use crate::state::SearchResult;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 
+// --- INODE ZONING SPECIFICATION ---
+// Bit 63 (Highest Bit) indicates PERSISTENCE.
+// If set, the Inode is backed by the DB (Tags, Files).
+// If unset, the Inode is ephemeral (Search results, Active queries).
+
+const PERSISTENT_FLAG: u64 = 1 << 63; // 9,223,372,036,854,775,808
+
 #[derive(Debug, Clone)]
 pub struct Inode {
     pub id: u64,
@@ -15,19 +22,17 @@ pub struct Inode {
     pub children: Vec<u64>,
     pub results: Option<Vec<SearchResult>>,
     pub created_at: u64,
-    /// NEW: Has this inode been accessed (readdir/lookup child) yet?
-    /// This prevents "Typewriter" phantom searches.
     pub initialized: bool,
 }
 
 pub struct InodeStore {
-    // Maps Query String -> Inode ID
+    // Maps Query String -> Inode ID (Transient)
     queries: RwLock<HashMap<String, u64>>,
     
-    // Maps Inode ID -> Inode Data
+    // Maps Inode ID -> Inode Data (Transient)
     inodes: RwLock<BTreeMap<u64, Inode>>,
     
-    // Counter for new dynamic inodes
+    // Counter for new dynamic inodes (Transient)
     next_inode: RwLock<u64>,
 
     // Maps Inode ID -> Real File Path (for Mirror Mode)
@@ -57,6 +62,21 @@ impl InodeStore {
             next_inode: RwLock::new(100),
             mirror_paths: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Checks if an Inode ID belongs to the Persistent Zone (DB backed)
+    pub fn is_persistent(inode: u64) -> bool {
+        (inode & PERSISTENT_FLAG) != 0
+    }
+
+    /// Converts a DB ID (auto-increment) to a Persistent Inode
+    pub fn db_id_to_inode(db_id: u64) -> u64 {
+        db_id | PERSISTENT_FLAG
+    }
+
+    /// Converts a Persistent Inode back to a DB ID
+    pub fn inode_to_db_id(inode: u64) -> u64 {
+        inode & !PERSISTENT_FLAG
     }
 
     pub fn get_or_create_inode(&self, query: &str) -> u64 {
@@ -105,6 +125,11 @@ impl InodeStore {
     }
 
     pub fn get_inode(&self, inode: u64) -> Option<Inode> {
+        if Self::is_persistent(inode) {
+            // TODO: In Phase 12 Step 3 (The Router), we will query SQLite here.
+            // For now, return None as we haven't wired up the DB to this function yet.
+            return None; 
+        }
         self.inodes.read().unwrap().get(&inode).cloned()
     }
 
