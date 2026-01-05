@@ -45,7 +45,42 @@
 
 ## 🛠️ Phase 13: Developer Experience & Stability
 **Goal:** Solidify the binary for daily driving.
-
+_this is paused until the completion of phase 14 and 15 atleast_
 - [ ] **Daemonize Properly:** Ensure `systemd` service handles suspend/wake cycles correctly.
 - [ ] **The "Nuke" Protocol:** A robust way to clear the cache when the AI model changes (Version pinning).
 - [ ] **Log Rotation:** Prevent `magicfs.log` from eating the disk during long runs.
+
+
+## 🚧 Phase 14: The Smart Hierarchy (Active Development)
+**Goal:** Implement the "Tags as Folders" architecture defined in `SPEC_PERSISTENCE.md`.
+
+### 1. Structure Management (The Light Tree)
+This enables persistent directory organization.
+- [ ] **Hierarchical `mkdir`:** Implement `create_directory` handler in HollowDrive.
+    - Must resolve `parent` inode to `tag_id`.
+    - Must `INSERT INTO tags` with `parent_tag_id`.
+- [ ] **Hierarchical `readdir`:** Update `readdir` loop for `INODE_TAGS` and persistent tags.
+    - *Query:* Must fetch `SELECT * FROM tags WHERE parent_tag_id = ?` (Sub-folders).
+    - *Merge:* Must append these results to the file list.
+- [ ] **Hierarchical `lookup`:** Update `lookup` logic.
+    - Priority 1: Check for Sub-Tag (Folder).
+    - Priority 2: Check for File (Existing logic).
+- [ ] **Hierarchical `rmdir`:** Implement `rmdir` handler.
+    - Check for children/files. If empty, `DELETE FROM tags`.
+
+### 2. Semantic Relevance (The AI Boost)
+- [ ] **Payload Decoration:** Modify `src/engine/indexer.rs`.
+    - Update `index_file` to prepend `Filename: X\nTags: Y\n---\n` to the text content before chunking/embedding.
+    - *Note:* This requires re-indexing. Update `CRUCIAL_LEARNINGS` about cache invalidation.
+
+### 3. The Dark Graph (The Filter View)
+*Postponed until Structure is stable.*
+- [ ] **Ephemeral Inode Resolution:** Update `lookup` to handle "Global Tag" resolution if child lookup fails.
+- [ ] **Intersection Context:** Create an in-memory `LruCache` mapping `EphemeralInode -> Vec<TagID>`.
+- [ ] **Filtered `readdir`:** Implement `readdir` for Ephemeral Inodes that runs `INTERSECT` queries.
+
+---
+
+## 🗑️ Phase 15: Safety & Cleanup (Next)
+- [ ] **The Wastebin:** Implement `@trash` tag logic.
+- [ ] **The Untag Logic:** `unlink` removes `file_tags` row.
