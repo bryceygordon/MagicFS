@@ -94,3 +94,13 @@
 ### 16. Time Stability (The Nervous Twitch)
 * **Why:** File managers cache directory contents based on `mtime`. If `mtime` updates on every access (SystemTime::now), the file manager invalidates its cache and rescans constantly (Infinite Loop).
 * **Decision:** Virtual directories must report a **Stable Timestamp** (Daemon Start Time). This allows the OS to trust its cache and stop probing for hidden files.
+
+### 17. The Hash Stability Law (FUSE Inodes)
+* **Why:** Rust's `DefaultHasher` is randomized per process instance to prevent HashDoS attacks.
+* **Failure:** If the daemon restarts, the hash of "file_A" changes. The OS (kernel) still holds the old inode number. When it calls `open(old_inode)`, the daemon calculates `hash(path) -> new_inode` and fails to match.
+* **Decision:** ALWAYS use a deterministic hasher (e.g., **FNV-1a**) for generating inodes from file paths. FUSE inodes must be mathematically stable functions of their path.
+
+### 18. The Metadata Precision Gap (Efficiency)
+* **Why:** Linux filesystems store `mtime` with nanosecond precision. SQLite stores it as seconds (INTEGER).
+* **Failure:** When checking `if fs_mtime > db_mtime`, a file modified at `100.5s` looks newer than the DB record of `100s`, causing infinite re-indexing loops on startup.
+* **Decision:** The Librarian must allow a **1-second epsilon (drift)** when comparing timestamps. `abs(fs_mtime - db_mtime) > 1`.

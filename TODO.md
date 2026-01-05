@@ -25,13 +25,13 @@
 - [x] **Lower Memory Test:** Reduce `test_09_memory_leak` queries from 2000 to 500 (Completed in chat, needs commit).
 
 ### 2. The Foundation (Schema & Routing)
-- [ ] **Schema Migration:** Implement `files`, `tags`, and `file_tags` tables in SQLite.
-- [ ] **Inode Zoning:** Implement `PERSISTENT_OFFSET` (High-Bit logic) in `InodeStore`.
-- [ ] **The Router:** Modify `InodeStore::get_inode` to route High-Bit IDs to SQLite and Low-Bit IDs to RAM.
+- [x] **Schema Migration:** Implement `files`, `tags`, and `file_tags` tables in SQLite.
+- [x] **Inode Zoning:** Implement `PERSISTENT_OFFSET` (High-Bit logic) in `InodeStore`.
+- [x] **The Router:** Modify `InodeStore::get_inode` to route High-Bit IDs to SQLite and Low-Bit IDs to RAM.
 
 ### 3. The Logical Views (Read)
-- [ ] **Root Generation:** Expose `/magic/tags` and `/magic/inbox` via FUSE.
-- [ ] **Tag Listing:** `readdir` on `/tags` queries the `tags` table.
+- [x] **Root Generation:** Expose `/magic/tags` and `/magic/inbox` via FUSE.
+- [x] **Tag Listing:** `readdir` on `/tags` queries the `tags` table.
 - [ ] **File Listing:** `readdir` on `/tags/foo` queries the `file_tags` table.
 - [ ] **Collision Resolution:** Implement the "Smart Contextual Aliasing" logic (Tag/Origin suffixes) for duplicate filenames in a view.
 

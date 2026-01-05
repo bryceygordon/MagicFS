@@ -3,15 +3,11 @@ use std::collections::{HashMap, BTreeMap};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::state::SearchResult;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
+// Removed DefaultHasher import to avoid temptation
 
 // --- INODE ZONING SPECIFICATION ---
 // Bit 63 (Highest Bit) indicates PERSISTENCE.
-// If set, the Inode is backed by the DB (Tags, Files).
-// If unset, the Inode is ephemeral (Search results, Active queries).
-
-const PERSISTENT_FLAG: u64 = 1 << 63; // 9,223,372,036,854,775,808
+const PERSISTENT_FLAG: u64 = 1 << 63; 
 
 #[derive(Debug, Clone)]
 pub struct Inode {
@@ -26,16 +22,9 @@ pub struct Inode {
 }
 
 pub struct InodeStore {
-    // Maps Query String -> Inode ID (Transient)
     queries: RwLock<HashMap<String, u64>>,
-    
-    // Maps Inode ID -> Inode Data (Transient)
     inodes: RwLock<BTreeMap<u64, Inode>>,
-    
-    // Counter for new dynamic inodes (Transient)
     next_inode: RwLock<u64>,
-
-    // Maps Inode ID -> Real File Path (for Mirror Mode)
     mirror_paths: RwLock<HashMap<u64, String>>,
 }
 
@@ -52,35 +41,30 @@ impl InodeStore {
             children: Vec::new(),
             results: None,
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            initialized: true, // Root is always active
+            initialized: true,
         });
 
         Self {
             queries: RwLock::new(HashMap::new()),
             inodes: RwLock::new(inodes),
-            // Start at 100 to avoid collision with reserved FUSE inodes (1=Root, 2=.magic, 3=search, 4=refresh, 5=mirror)
             next_inode: RwLock::new(100),
             mirror_paths: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Checks if an Inode ID belongs to the Persistent Zone (DB backed)
     pub fn is_persistent(inode: u64) -> bool {
         (inode & PERSISTENT_FLAG) != 0
     }
 
-    /// Converts a DB ID (auto-increment) to a Persistent Inode
     pub fn db_id_to_inode(db_id: u64) -> u64 {
         db_id | PERSISTENT_FLAG
     }
 
-    /// Converts a Persistent Inode back to a DB ID
     pub fn inode_to_db_id(inode: u64) -> u64 {
         inode & !PERSISTENT_FLAG
     }
 
     pub fn get_or_create_inode(&self, query: &str) -> u64 {
-        // Fast path: Check existence
         {
             let map = self.queries.read().unwrap();
             if let Some(&id) = map.get(query) {
@@ -88,12 +72,10 @@ impl InodeStore {
             }
         }
 
-        // Slow path: Create new
         let mut map = self.queries.write().unwrap();
         let mut inodes = self.inodes.write().unwrap();
         let mut next = self.next_inode.write().unwrap();
 
-        // Double check after lock
         if let Some(&id) = map.get(query) {
             return id;
         }
@@ -101,22 +83,19 @@ impl InodeStore {
         let id = *next;
         *next += 1;
 
-        // Register Inode
         inodes.insert(id, Inode {
             id,
             query: query.to_string(),
-            parent: 1, // All search queries are children of Root
+            parent: 1, 
             is_dir: true,
             children: Vec::new(),
             results: None,
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            // NEW: Default to FALSE. We acknowledge existence, but don't search yet.
             initialized: false,
         });
 
         map.insert(query.to_string(), id);
 
-        // Add to Root's children
         if let Some(root) = inodes.get_mut(&1) {
             root.children.push(id);
         }
@@ -126,8 +105,6 @@ impl InodeStore {
 
     pub fn get_inode(&self, inode: u64) -> Option<Inode> {
         if Self::is_persistent(inode) {
-            // TODO: In Phase 12 Step 3 (The Router), we will query SQLite here.
-            // For now, return None as we haven't wired up the DB to this function yet.
             return None; 
         }
         self.inodes.read().unwrap().get(&inode).cloned()
@@ -156,12 +133,8 @@ impl InodeStore {
         false
     }
 
-    // NEW: The Trigger Mechanism
-    // Called by FUSE when a directory is entered (readdir) or a child file is accessed.
     pub fn mark_active(&self, inode: u64) {
-        // Protect reserved inodes
         if inode <= 5 { return; }
-
         let mut inodes = self.inodes.write().unwrap();
         if let Some(node) = inodes.get_mut(&inode) {
             if !node.initialized {
@@ -171,15 +144,23 @@ impl InodeStore {
         }
     }
 
-    // Deterministic hashing for file mapping (used for Mirror Mode and Search Results)
+    /// STABLE FNV-1a HASHING
+    /// Replaces DefaultHasher to guarantee that hash_to_inode("A") 
+    /// returns the same ID across readdir() and open() calls.
     pub fn hash_to_inode(&self, key: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
+        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+
+        let mut hash = FNV_OFFSET_BASIS;
+        for byte in key.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        
         // Ensure it doesn't collide with reserved inodes or small counters
-        hasher.finish().saturating_add(100000)
+        hash.saturating_add(100000)
     }
 
-    // Mirror Path Management
     pub fn put_mirror_path(&self, inode: u64, path: String) {
         self.mirror_paths.write().unwrap().insert(inode, path);
     }
@@ -188,14 +169,10 @@ impl InodeStore {
         self.mirror_paths.read().unwrap().get(&inode).cloned()
     }
 
-    /// Returns a snapshot of active queries (InodeID, QueryString)
-    /// Used by Oracle to find work.
-    /// UPDATED: Now filters by `initialized` to support Lazy Search.
     pub fn active_queries(&self) -> Vec<(u64, String)> {
         let inodes = self.inodes.read().unwrap();
         inodes.values()
             .filter(|n| n.id > 5 && n.is_dir) 
-            // CRITICAL: Only return queries that have been TRIGGERED
             .filter(|n| n.initialized)
             .map(|n| (n.id, n.query.clone()))
             .collect()
@@ -210,19 +187,14 @@ impl InodeStore {
         }
     }
 
-    // --- Ghost Busting (Debouncing) ---
     pub fn prune_inode(&self, inode: u64) {
-        // Protect reserved inodes (1-5)
         if inode <= 5 { return; } 
 
         let mut inodes = self.inodes.write().unwrap();
         let mut queries = self.queries.write().unwrap();
 
         if let Some(node) = inodes.remove(&inode) {
-            // 1. Remove from Query Map
             queries.remove(&node.query);
-
-            // 2. Remove from Parent's children list (Root)
             if let Some(parent) = inodes.get_mut(&node.parent) {
                 if let Some(pos) = parent.children.iter().position(|&x| x == inode) {
                     parent.children.swap_remove(pos);
