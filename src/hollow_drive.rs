@@ -11,7 +11,8 @@ use std::time::{SystemTime, Duration};
 use std::path::Path;
 use std::sync::Arc;
 use libc;
-use rusqlite::params; // Added for DB queries
+use rusqlite::params;
+use std::collections::HashMap;
 
 // --- INODE CONSTANTS ---
 const INODE_ROOT: u64 = 1;
@@ -29,6 +30,31 @@ pub struct HollowDrive {
 impl HollowDrive {
     pub fn new(state: SharedState) -> Self {
         Self { state }
+    }
+
+    /// Helper to parse virtual filenames like "report (1).pdf" -> ("report.pdf", 1)
+    fn parse_virtual_name(name: &str) -> Option<(String, usize)> {
+        // 1. Find extension
+        let path = Path::new(name);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+
+        // 2. Check for " (N)" at the end of stem
+        if stem.ends_with(')') {
+            if let Some(open_idx) = stem.rfind(" (") {
+                let number_part = &stem[open_idx + 2..stem.len() - 1];
+                if let Ok(n) = number_part.parse::<usize>() {
+                    let base_stem = &stem[..open_idx];
+                    let base_name = if ext.is_empty() {
+                        base_stem.to_string()
+                    } else {
+                        format!("{}.{}", base_stem, ext)
+                    };
+                    return Some((base_name, n));
+                }
+            }
+        }
+        None
     }
 
     fn find_real_path(&self, target_inode: u64) -> Option<String> {
@@ -59,8 +85,6 @@ impl HollowDrive {
         }
         
         // 3. Persistent Files (Tag View)
-        // If the inode matches a real file in our DB, return it.
-        // We can check the DB directly.
         let mut conn_lock = state_guard.db_connection.lock().ok()?;
         if let Some(conn) = conn_lock.as_mut() {
              let mut stmt = conn.prepare("SELECT abs_path FROM file_registry WHERE inode = ?1").ok()?;
@@ -224,35 +248,88 @@ impl Filesystem for HollowDrive {
                 let mut conn_lock = state_guard.db_connection.lock().unwrap();
                 
                 if let Some(conn) = conn_lock.as_mut() {
-                    // Look for file inside this tag
-                    let sql = "
+                    // RESOLUTION STRATEGY:
+                    // 1. Try exact match first
+                    // 2. If fail, try parsing "name (N).ext" and fetching Nth duplicate
+                    
+                    let mut target_inode = None;
+                    let mut target_meta = None;
+
+                    // Attempt 1: Exact Match
+                    let sql_exact = "
                         SELECT f.inode, f.size, f.mtime, f.is_dir 
                         FROM file_tags ft 
                         JOIN file_registry f ON ft.file_id = f.file_id 
                         WHERE ft.tag_id = ?1 AND ft.display_name = ?2
                     ";
                     
-                    if let Ok(mut stmt) = conn.prepare(sql) {
-                        let row_res = stmt.query_row(params![tag_id, name_str], |row| {
+                    if let Ok(mut stmt) = conn.prepare(sql_exact) {
+                        let rows_res = stmt.query_map(params![tag_id, name_str], |row| {
                             Ok((
-                                row.get::<_, u64>(0)?, // inode
-                                row.get::<_, u64>(1)?, // size
-                                row.get::<_, u64>(2)?, // mtime
-                                row.get::<_, i32>(3)?  // is_dir
+                                row.get::<_, u64>(0)?, 
+                                row.get::<_, u64>(1)?, 
+                                row.get::<_, u64>(2)?, 
+                                row.get::<_, i32>(3)?
                             ))
                         });
 
-                        if let Ok((inode, size, mtime, is_dir_int)) = row_res {
-                            let kind = if is_dir_int != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
-                            let perm = if is_dir_int != 0 { 0o755 } else { 0o644 };
-                            let mut attr = mk_attr(inode, kind, perm);
-                            attr.size = size;
-                            attr.blocks = (size + 511)/512;
-                            attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
-                            
-                            reply.entry(&ttl, &attr, 0);
-                            return;
+                        if let Ok(mut rows) = rows_res {
+                            if let Some(Ok(row)) = rows.next() {
+                                target_inode = Some(row.0);
+                                target_meta = Some((row.1, row.2, row.3));
+                            }
                         }
+                    }
+
+                    // Attempt 2: Virtual Alias Resolution (if exact match failed)
+                    if target_inode.is_none() {
+                        if let Some((base_name, index)) = Self::parse_virtual_name(name_str) {
+                             // Fetch ALL duplicates for base_name, sorted deterministically (by file_id)
+                             let sql_alias = "
+                                SELECT f.inode, f.size, f.mtime, f.is_dir 
+                                FROM file_tags ft 
+                                JOIN file_registry f ON ft.file_id = f.file_id 
+                                WHERE ft.tag_id = ?1 AND ft.display_name = ?2
+                                ORDER BY f.file_id ASC
+                             ";
+                             
+                             if let Ok(mut stmt) = conn.prepare(sql_alias) {
+                                 let rows_res = stmt.query_map(params![tag_id, base_name], |row| {
+                                     Ok((
+                                         row.get::<_, u64>(0)?, 
+                                         row.get::<_, u64>(1)?, 
+                                         row.get::<_, u64>(2)?, 
+                                         row.get::<_, i32>(3)?
+                                     ))
+                                 });
+
+                                 if let Ok(rows) = rows_res {
+                                     // Skip 'index' items
+                                     for (i, row) in rows.enumerate() {
+                                         if i == index {
+                                             if let Ok(r) = row {
+                                                 target_inode = Some(r.0);
+                                                 target_meta = Some((r.1, r.2, r.3));
+                                             }
+                                             break;
+                                         }
+                                     }
+                                 }
+                             }
+                        }
+                    }
+
+                    if let Some(inode) = target_inode {
+                        let (size, mtime, is_dir_int) = target_meta.unwrap();
+                        let kind = if is_dir_int != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
+                        let perm = if is_dir_int != 0 { 0o755 } else { 0o644 };
+                        let mut attr = mk_attr(inode, kind, perm);
+                        attr.size = size;
+                        attr.blocks = (size + 511)/512;
+                        attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
+                        
+                        reply.entry(&ttl, &attr, 0);
+                        return;
                     }
                 }
                 reply.error(libc::ENOENT);
@@ -537,6 +614,7 @@ impl Filesystem for HollowDrive {
                     FROM file_tags ft 
                     JOIN file_registry f ON ft.file_id = f.file_id 
                     WHERE ft.tag_id = ?1
+                    ORDER BY f.file_id ASC
                  ";
                  if let Ok(mut stmt) = conn.prepare(sql) {
                      let rows = stmt.query_map(params![tag_id], |row| {
@@ -547,10 +625,31 @@ impl Filesystem for HollowDrive {
                          ))
                      }).unwrap();
                      
+                     // COLLISION RESOLUTION: Count Names
+                     let mut name_counts: HashMap<String, usize> = HashMap::new();
+
                      for row in rows {
                          if let Ok((inode, is_dir_int, name)) = row {
                              let kind = if is_dir_int != 0 { FileType::Directory } else { FileType::RegularFile };
-                             items.push((inode, kind, name));
+                             
+                             let count = name_counts.entry(name.clone()).or_insert(0);
+                             let display_name = if *count == 0 {
+                                 name.clone()
+                             } else {
+                                 // "file.txt" -> "file (1).txt"
+                                 let path = Path::new(&name);
+                                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
+                                 
+                                 if ext.is_empty() {
+                                     format!("{} ({})", stem, count)
+                                 } else {
+                                     format!("{} ({}).{}", stem, count, ext)
+                                 }
+                             };
+                             *count += 1;
+
+                             items.push((inode, kind, display_name));
                          }
                      }
                  }

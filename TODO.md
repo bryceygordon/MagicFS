@@ -33,7 +33,7 @@
 - [x] **Root Generation:** Expose `/magic/tags` and `/magic/inbox` via FUSE.
 - [x] **Tag Listing:** `readdir` on `/tags` queries the `tags` table.
 - [x] **File Listing:** `readdir` on `/tags/foo` queries the `file_tags` table.
-- [ ] **Collision Resolution:** Implement the "Smart Contextual Aliasing" logic (Tag/Origin suffixes) for duplicate filenames in a view.
+- [x] **Collision Resolution:** Implement the "Smart Contextual Aliasing" logic (Tag/Origin suffixes) for duplicate filenames in a view.
 
 ### 4. Semantic Operations (Write)
 - [ ] **Tagging (CP):** Implement `create/link` logic to insert into `file_tags`.
