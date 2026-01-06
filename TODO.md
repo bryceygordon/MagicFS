@@ -14,73 +14,76 @@
     - [x] The Ephemeral Promise (Lazy Loading to fix Autosuggest)
     - [x] The Bouncer (Noise filtering policy)
     - [x] Typewriter & Backspace suppression (via Lazy Loading)
+- [x] **Phase 12: The Persistence Kernel**
+    - [x] **Schema v1:** `files`, `tags`, `file_tags` tables.
+    - [x] **Inode Zoning:** High-Bit `PERSISTENT_FLAG` logic.
+    - [x] **The Router:** `lookup/readdir` routing for Persistent vs Ephemeral inodes.
+    - [x] **Basic Views:** Listing `/magic/tags` and `/magic/tags/[tag]`.
+    - [x] **Write Ops:** `create` (Import), `rename` (Retagging/Aliasing).
 
 ---
 
-## 🚧 Phase 12: Organization & The Semantic Graph (Current Focus)
-**Ref:** `SPEC_PERSISTENCE.md`
-**Goal:** Implement the "Inode Router" and "Object Store" model.
+## 🚧 Phase 14: The Smart Hierarchy (Active Focus)
+**Ref:** `SPEC_PERSISTENCE.md` v2.0
+**Goal:** Complete the translation of Unix Directory semantics into Graph Database operations.
 
-### 1. Housekeeping
-- [x] **Lower Memory Test:** Reduce `test_09_memory_leak` queries from 2000 to 500 (Completed in chat, needs commit).
+### 1. Schema Upgrade (Spec v2.0)
+- [ ] **Metadata Columns:** Update `tags` table with `color`, `icon`, `is_system`.
+- [ ] **System Tags:** Ensure migration creates `Inbox` (ID 1) and `Trash` (ID 2).
 
-### 2. The Foundation (Schema & Routing)
-- [x] **Schema Migration:** Implement `files`, `tags`, and `file_tags` tables in SQLite.
-- [x] **Inode Zoning:** Implement `PERSISTENT_OFFSET` (High-Bit logic) in `InodeStore`.
-- [x] **The Router:** Modify `InodeStore::get_inode` to route High-Bit IDs to SQLite and Low-Bit IDs to RAM.
+### 2. Directory Structure Management (The Light Tree)
+*Enabling users to organize knowledge via `mkdir` and `rmdir`.*
+- [ ] **Hierarchical `mkdir`:** Implement handler in `HollowDrive`.
+    - *Logic:* `INSERT INTO tags (name, parent_tag_id) VALUES (...)`.
+    - *Constraint:* Prevent duplicate names in same parent.
+- [ ] **Hierarchical `rmdir`:** Implement handler.
+    - *Logic:* Check if empty (no sub-tags, no files). If safe, `DELETE FROM tags`.
+- [ ] **Tag Reparenting (`mv folder folder`):**
+    - *Logic:* Update `parent_tag_id` on the moved tag.
+    - *Constraint:* Check for circular dependency.
 
-### 3. The Logical Views (Read)
-- [x] **Root Generation:** Expose `/magic/tags` and `/magic/inbox` via FUSE.
-- [x] **Tag Listing:** `readdir` on `/tags` queries the `tags` table.
-- [x] **File Listing:** `readdir` on `/tags/foo` queries the `file_tags` table.
-- [x] **Collision Resolution:** Implement the "Smart Contextual Aliasing" logic (Tag/Origin suffixes) for duplicate filenames in a view.
-
-### 4. Semantic Operations (Write)
-- [x] **Tagging (CP):** Implement `create/link` logic to insert into `file_tags`.
-- [x] **Retagging (MV):** Implement `rename` logic to update `tag_id`.
-- [x] **Aliasing (MV):** Implement `rename` logic to update `display_name` when source dir == dest dir.
-- [ ] **The Wastebin:** Implement `@trash` tag logic and override queries to hide trashed items.
-
----
-
-## 🛠️ Phase 13: Developer Experience & Stability
-**Goal:** Solidify the binary for daily driving.
-_this is paused until the completion of phase 14 and 15 atleast_
-- [ ] **Daemonize Properly:** Ensure `systemd` service handles suspend/wake cycles correctly.
-- [ ] **The "Nuke" Protocol:** A robust way to clear the cache when the AI model changes (Version pinning).
-- [ ] **Log Rotation:** Prevent `magicfs.log` from eating the disk during long runs.
-
-
-## 🚧 Phase 14: The Smart Hierarchy (Active Development)
-**Goal:** Implement the "Tags as Folders" architecture defined in `SPEC_PERSISTENCE.md`.
-
-### 1. Structure Management (The Light Tree)
-This enables persistent directory organization.
-- [ ] **Hierarchical `mkdir`:** Implement `create_directory` handler in HollowDrive.
-    - Must resolve `parent` inode to `tag_id`.
-    - Must `INSERT INTO tags` with `parent_tag_id`.
-- [ ] **Hierarchical `readdir`:** Update `readdir` loop for `INODE_TAGS` and persistent tags.
-    - *Query:* Must fetch `SELECT * FROM tags WHERE parent_tag_id = ?` (Sub-folders).
-    - *Merge:* Must append these results to the file list.
-- [ ] **Hierarchical `lookup`:** Update `lookup` logic.
-    - Priority 1: Check for Sub-Tag (Folder).
-    - Priority 2: Check for File (Existing logic).
-- [ ] **Hierarchical `rmdir`:** Implement `rmdir` handler.
-    - Check for children/files. If empty, `DELETE FROM tags`.
-
-### 2. Semantic Relevance (The AI Boost)
-- [ ] **Payload Decoration:** Modify `src/engine/indexer.rs`.
-    - Update `index_file` to prepend `Filename: X\nTags: Y\n---\n` to the text content before chunking/embedding.
-    - *Note:* This requires re-indexing. Update `CRUCIAL_LEARNINGS` about cache invalidation.
-
-### 3. The Dark Graph (The Filter View)
-*Postponed until Structure is stable.*
-- [ ] **Ephemeral Inode Resolution:** Update `lookup` to handle "Global Tag" resolution if child lookup fails.
-- [ ] **Intersection Context:** Create an in-memory `LruCache` mapping `EphemeralInode -> Vec<TagID>`.
-- [ ] **Filtered `readdir`:** Implement `readdir` for Ephemeral Inodes that runs `INTERSECT` queries.
+### 3. The Inbox Workflow
+- [ ] **Landing Zone Logic:** `create/cp` into `/magic/inbox` maps to `tag_id=1`.
+- [ ] **Processing Logic:** `mv` from `/inbox` to `/finance` updates the `tag_id`.
 
 ---
 
-## 🗑️ Phase 15: Safety & Cleanup (Next)
-- [ ] **The Wastebin:** Implement `@trash` tag logic.
-- [ ] **The Untag Logic:** `unlink` removes `file_tags` row.
+## 🛠️ Phase 15: Safety & Garbage Collection
+**Goal:** Ensure the "Permeable Garden" doesn't accumulate rot.
+- [ ] **The Wastebin:** Implement `rm` -> Move to `@trash` logic.
+- [ ] **The Incinerator:** Background job to physically delete files that have been in `@trash` > 30 days.
+- [ ] **Orphan Collection:** Scan for `file_registry` entries with 0 tags and auto-tag as `@untagged`.
+
+---
+
+## 🖥️ Phase 16: The Metadata Sidecar (Future Thin Client)
+**Goal:** Prepare the DB for concurrent read-access by the GUI Client.
+- [ ] **Permission Hardening:** Ensure `index.db`, `.wal`, and `.shm` are readable by the user group (0664), even if Daemon runs as root.
+- [ ] **Query Performance:** Add indices on `file_tags(tag_id)` and `tags(parent_tag_id)` for instant UI tree rendering.
+
+---
+
+## 📄 Phase 17: Universal Ingestion (Evernote Parity)
+**Goal:** "Everything is a Note."
+- [ ] **PDF Text Extraction:** Integrate `poppler` or `pdf-extract` into `Indexer`.
+- [ ] **Image OCR:** (Long term) Integration for "Scan to Inbox".
+
+---
+
+## 🤖 Phase 18: Auto-Organization (The Magnet)
+**Goal:** Implement "Magnetic Tags" and Semantic Gravity.
+**Ref:** `SPEC_AUTO_ORGANIZATION.md`
+
+### 1. Schema & State
+- [ ] **Migration:** Add `centroid` (blob) and `description` to `tags`.
+- [ ] **Migration:** Add `is_auto` to `file_tags`.
+- [ ] **State:** Load Tag Centroids into memory (HashMap) on startup for fast comparison (avoiding SQL queries per file).
+
+### 2. The Magnet Worker
+- [ ] **Regex Engine:** Implement simple date/pattern scanner in `Indexer`.
+- [ ] **Vector Math:** Implement Cosine Similarity check against all active Tag Centroids.
+- [ ] **Auto-Linker:** Logic to `INSERT` into `file_tags` with `is_auto=1`.
+
+### 3. The Learning Loop
+- [ ] **Recalculator:** Trigger a Centroid update whenever a file is manually moved (`rename`) or confirmed.
+- [ ] **Confirmation Logic:** Update `is_auto=0` on `open()` events in `HollowDrive`.
