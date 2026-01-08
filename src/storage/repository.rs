@@ -204,4 +204,172 @@ impl<'a> Repository<'a> {
         for r in rows { results.push(r?); }
         Ok(results)
     }
+
+    /// Checks if moving a tag would create a circular dependency.
+    /// Returns true if circular.
+    pub fn is_circular_dependency(&self, target_tag_id: u64, new_parent_id: u64) -> Result<bool> {
+        let sql = "
+            WITH RECURSIVE parent_chain(tag_id, parent_tag_id) AS (
+                SELECT tag_id, parent_tag_id FROM tags WHERE tag_id = ?1
+                UNION ALL
+                SELECT t.tag_id, t.parent_tag_id
+                FROM tags t
+                JOIN parent_chain pc ON t.tag_id = pc.parent_tag_id
+            )
+            SELECT COUNT(*) FROM parent_chain WHERE tag_id = ?2
+        ";
+        let count: i64 = self.conn.query_row(sql, params![new_parent_id, target_tag_id], |r| r.get(0))?;
+        Ok(count > 0)
+    }
+
+    pub fn create_tag(&self, name: &str, parent_id: Option<u64>) -> Result<u64> {
+        let sql = "INSERT INTO tags (name, parent_tag_id) VALUES (?1, ?2)";
+        self.conn.execute(sql, params![name, parent_id])?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    pub fn delete_tag(&self, tag_id: u64) -> Result<()> {
+        // Check for children or files first to return ENOTEMPTY
+        let children: i64 = self.conn.query_row("SELECT COUNT(*) FROM tags WHERE parent_tag_id = ?1", params![tag_id], |r| r.get(0))?;
+        let files: i64 = self.conn.query_row("SELECT COUNT(*) FROM file_tags WHERE tag_id = ?1", params![tag_id], |r| r.get(0))?;
+
+        if children > 0 || files > 0 {
+            return Err(MagicError::State("Directory not empty".into()));
+        }
+
+        self.conn.execute("DELETE FROM tags WHERE tag_id = ?1", params![tag_id])?;
+        Ok(())
+    }
+
+    pub fn rename_tag(&self, tag_id: u64, new_name: &str) -> Result<()> {
+        self.conn.execute("UPDATE tags SET name = ?1 WHERE tag_id = ?2", params![new_name, tag_id])?;
+        Ok(())
+    }
+
+    pub fn move_tag(&self, tag_id: u64, new_parent_id: u64, new_name: &str) -> Result<()> {
+        if self.is_circular_dependency(tag_id, new_parent_id)? {
+            return Err(MagicError::State("Circular dependency detected".into()));
+        }
+
+        // Check if destination already has a tag with the new name
+        let exists_check: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tags WHERE parent_tag_id = ?1 AND name = ?2 AND tag_id != ?3",
+            params![new_parent_id, new_name, tag_id],
+            |r| r.get(0)
+        )?;
+
+        if exists_check > 0 {
+            return Err(MagicError::State("Tag exists".into()));
+        }
+
+        self.conn.execute(
+            "UPDATE tags SET parent_tag_id = ?1, name = ?2 WHERE tag_id = ?3",
+            params![new_parent_id, new_name, tag_id]
+        )?;
+        Ok(())
+    }
+
+    /// Moves a file from one tag to another (Retagging)
+    pub fn move_file_between_tags(&mut self, file_id: u64, old_tag_id: u64, new_tag_id: u64, new_name: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            // Check for name collision in destination
+            let exists: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM file_tags WHERE tag_id = ?1 AND display_name = ?2",
+                params![new_tag_id, new_name],
+                |r| r.get(0)
+            )?;
+
+            if exists > 0 {
+                return Err(MagicError::State("File exists".into()));
+            }
+
+            // Remove old link
+            tx.execute("DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2", params![file_id, old_tag_id])?;
+
+            // Create new link
+            tx.execute(
+                "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
+                params![file_id, new_tag_id, new_name]
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Renames a file within the same tag
+    pub fn rename_file_in_tag(&self, file_id: u64, tag_id: u64, new_name: &str) -> Result<()> {
+        // Check for conflicts
+        let exists_check: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM file_tags WHERE tag_id = ?1 AND display_name = ?2 AND file_id != ?3",
+            params![tag_id, new_name, file_id],
+            |r| r.get(0)
+        )?;
+
+        if exists_check > 0 {
+            return Err(MagicError::State("File exists".into()));
+        }
+
+        self.conn.execute(
+            "UPDATE file_tags SET display_name = ?1 WHERE file_id = ?2 AND tag_id = ?3",
+            params![new_name, file_id, tag_id]
+        )?;
+        Ok(())
+    }
+
+    /// Get tag ID by name and parent
+    pub fn get_tag_id_by_name(&self, name: &str, parent_id: Option<u64>) -> Result<Option<u64>> {
+        let sql = if parent_id.is_none() {
+            "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id IS NULL"
+        } else {
+            "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id = ?2"
+        };
+
+        let result = if let Some(pid) = parent_id {
+            self.conn.query_row(sql, params![name, pid], |r| r.get(0))
+        } else {
+            self.conn.query_row(sql, params![name], |r| r.get(0))
+        };
+
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(MagicError::Database(e)),
+        }
+    }
+
+    /// Get file ID by tag and display name
+    pub fn get_file_id_in_tag(&self, tag_id: u64, display_name: &str) -> Result<Option<u64>> {
+        let result = self.conn.query_row(
+            "SELECT file_id FROM file_tags WHERE tag_id = ?1 AND display_name = ?2",
+            params![tag_id, display_name],
+            |r| r.get(0)
+        );
+
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(MagicError::Database(e)),
+        }
+    }
+
+    /// Check if tag has any children
+    pub fn has_child_tags(&self, tag_id: u64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tags WHERE parent_tag_id = ?1",
+            params![tag_id],
+            |r| r.get(0)
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Check if tag has any files
+    pub fn has_files(&self, tag_id: u64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM file_tags WHERE tag_id = ?1",
+            params![tag_id],
+            |r| r.get(0)
+        )?;
+        Ok(count > 0)
+    }
 }

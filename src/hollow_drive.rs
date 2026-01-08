@@ -5,6 +5,8 @@ use fuser::{Filesystem, ReplyEntry, ReplyAttr, ReplyDirectory, ReplyOpen, ReplyD
 use crate::state::{SharedState, SearchWaiter};
 use crate::core::bouncer::Bouncer;
 use crate::core::inode_store::InodeStore;
+use crate::storage::repository::Repository;
+use crate::error::MagicError;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{FileExt, MetadataExt}; // Added MetadataExt for .ino()
 use std::time::{SystemTime, Duration};
@@ -12,7 +14,6 @@ use std::path::Path;
 use std::sync::Arc;
 use libc;
 use rusqlite::params;
-use std::collections::HashMap;
 
 // --- INODE CONSTANTS ---
 const INODE_ROOT: u64 = 1;
@@ -190,15 +191,23 @@ impl Filesystem for HollowDrive {
                     // Check DB for tag existence
                     let state_guard = self.state.read().unwrap();
                     let mut conn_lock = state_guard.db_connection.lock().unwrap();
-                    
-                    if let Some(conn) = conn_lock.as_mut() {
-                        let mut stmt = conn.prepare("SELECT tag_id FROM tags WHERE name = ?1").unwrap();
-                        let tag_id_res: std::result::Result<u64, _> = stmt.query_row([name_str], |r| r.get(0));
 
-                        if let Ok(tag_id) = tag_id_res {
-                            let persistent_inode = InodeStore::db_id_to_inode(tag_id);
-                            reply.entry(&ttl, &mk_attr(persistent_inode, fuser::FileType::Directory, 0o755), 0);
-                            return;
+                    if let Some(conn) = conn_lock.as_mut() {
+                        let repo = Repository::new(conn);
+                        match repo.get_tag_id_by_name(name_str, None) {
+                            Ok(Some(tag_id)) => {
+                                let persistent_inode = InodeStore::db_id_to_inode(tag_id);
+                                reply.entry(&ttl, &mk_attr(persistent_inode, fuser::FileType::Directory, 0o755), 0);
+                                return;
+                            }
+                            Ok(None) => {
+                                reply.error(libc::ENOENT);
+                                return;
+                            }
+                            Err(_) => {
+                                reply.error(libc::EIO);
+                                return;
+                            }
                         }
                     }
                     reply.error(libc::ENOENT);
@@ -334,16 +343,19 @@ impl Filesystem for HollowDrive {
                     }
 
                     if let Some(inode) = target_inode {
-                        let (size, mtime, is_dir_int) = target_meta.unwrap();
-                        let kind = if is_dir_int != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
-                        let perm = if is_dir_int != 0 { 0o755 } else { 0o644 };
-                        let mut attr = mk_attr(inode, kind, perm);
-                        attr.size = size;
-                        attr.blocks = (size + 511)/512;
-                        attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
-                        
-                        reply.entry(&ttl, &attr, 0);
-                        return;
+                        if let Some((size, mtime, is_dir_int)) = target_meta {
+                            let kind = if is_dir_int != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
+                            let perm = if is_dir_int != 0 { 0o755 } else { 0o644 };
+                            let mut attr = mk_attr(inode, kind, perm);
+                            attr.size = size;
+                            attr.blocks = (size + 511)/512;
+                            attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
+
+                            reply.entry(&ttl, &attr, 0);
+                            return;
+                        } else {
+                            tracing::error!("Target inode found but metadata missing for parent={}, name={}", parent, name_str);
+                        }
                     }
                 }
                 reply.error(libc::ENOENT);
@@ -547,15 +559,17 @@ impl Filesystem for HollowDrive {
             if let Some(conn) = conn_lock.as_mut() {
                 // Ignore error if table not ready, just empty list
                 if let Ok(mut stmt) = conn.prepare("SELECT tag_id, name FROM tags WHERE parent_tag_id IS NULL") {
-                     let rows = stmt.query_map([], |row| {
+                    if let Ok(rows) = stmt.query_map([], |row| {
                         Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
-                    }).unwrap();
-                    
-                    for row in rows {
-                        if let Ok((tag_id, name)) = row {
-                            let persistent_inode = InodeStore::db_id_to_inode(tag_id);
-                            items.push((persistent_inode, FileType::Directory, name));
+                    }) {
+                        for row in rows {
+                            if let Ok((tag_id, name)) = row {
+                                let persistent_inode = InodeStore::db_id_to_inode(tag_id);
+                                items.push((persistent_inode, FileType::Directory, name));
+                            }
                         }
+                    } else {
+                        tracing::error!("DB Error querying top-level tags");
                     }
                 }
             }
@@ -626,15 +640,17 @@ impl Filesystem for HollowDrive {
                  // First: Add child tags
                  let child_tag_sql = "SELECT tag_id, name FROM tags WHERE parent_tag_id = ?1";
                  if let Ok(mut stmt) = conn.prepare(child_tag_sql) {
-                     let rows = stmt.query_map(params![tag_id], |row| {
+                     if let Ok(rows) = stmt.query_map(params![tag_id], |row| {
                          Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
-                     }).unwrap();
-
-                     for row in rows {
-                         if let Ok((child_tag_id, name)) = row {
-                             let child_inode = InodeStore::db_id_to_inode(child_tag_id);
-                             items.push((child_inode, FileType::Directory, name));
+                     }) {
+                         for row in rows {
+                             if let Ok((child_tag_id, name)) = row {
+                                 let child_inode = InodeStore::db_id_to_inode(child_tag_id);
+                                 items.push((child_inode, FileType::Directory, name));
+                             }
                          }
+                     } else {
+                         tracing::error!("DB Error querying child tags");
                      }
                  }
 
@@ -647,40 +663,33 @@ impl Filesystem for HollowDrive {
                     ORDER BY f.file_id ASC
                  ";
                  if let Ok(mut stmt) = conn.prepare(sql) {
-                     let rows = stmt.query_map(params![tag_id], |row| {
+                     if let Ok(rows) = stmt.query_map(params![tag_id], |row| {
                          Ok((
-                             row.get::<_, u64>(0)?, 
-                             row.get::<_, i32>(1)?, 
+                             row.get::<_, u64>(0)?,
+                             row.get::<_, i32>(1)?,
                              row.get::<_, String>(2)?
                          ))
-                     }).unwrap();
-                     
-                     // COLLISION RESOLUTION: Count Names
-                     let mut name_counts: HashMap<String, usize> = HashMap::new();
+                     }) {
+                         // COLLISION RESOLUTION: Count Names
+                         let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-                     for row in rows {
-                         if let Ok((inode, is_dir_int, name)) = row {
-                             let kind = if is_dir_int != 0 { FileType::Directory } else { FileType::RegularFile };
-                             
-                             let count = name_counts.entry(name.clone()).or_insert(0);
-                             let display_name = if *count == 0 {
-                                 name.clone()
-                             } else {
-                                 // "file.txt" -> "file (1).txt"
-                                 let path = Path::new(&name);
-                                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
-                                 
-                                 if ext.is_empty() {
-                                     format!("{} ({})", stem, count)
+                         for row in rows {
+                             if let Ok((inode, is_dir, name)) = row {
+                                 let count = name_counts.entry(name.clone()).or_insert(0);
+                                 *count += 1;
+
+                                 let final_name = if *count > 1 {
+                                     format!("{} ({})", name, count)
                                  } else {
-                                     format!("{} ({}).{}", stem, count, ext)
-                                 }
-                             };
-                             *count += 1;
+                                     name
+                                 };
 
-                             items.push((inode, kind, display_name));
+                                 let kind = if is_dir != 0 { FileType::Directory } else { FileType::RegularFile };
+                                 items.push((inode, kind, final_name));
+                             }
                          }
+                     } else {
+                         tracing::error!("DB Error querying file tags");
                      }
                  }
              }
@@ -853,76 +862,40 @@ impl Filesystem for HollowDrive {
         let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
         if let Some(conn) = conn_lock.as_mut() {
+            let mut repo = Repository::new(conn);
+
             // Determine if we're renaming a file or a tag
             // First, check if it's a tag
-            let tag_id_result: std::result::Result<u64, _> = conn.query_row(
-                "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id = ?2",
-                params![name_str, source_tag_id],
-                |r| r.get(0)
-            );
+            let tag_id_opt = match repo.get_tag_id_by_name(name_str, Some(source_tag_id)) {
+                Ok(id) => id,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
 
-            if let Ok(tag_id) = tag_id_result {
+            if let Some(tag_id) = tag_id_opt {
                 // CASE: Renaming/moving a TAG
 
-                // Check for circular dependency if moving
                 if source_tag_id != dest_tag_id {
-                    // Verify that dest_tag_id is not a child of the tag being moved
-                    let check_circular_sql = "
-                        WITH RECURSIVE parent_chain(tag_id, parent_tag_id) AS (
-                            SELECT tag_id, parent_tag_id FROM tags WHERE tag_id = ?1
-                            UNION ALL
-                            SELECT t.tag_id, t.parent_tag_id
-                            FROM tags t
-                            JOIN parent_chain pc ON t.tag_id = pc.parent_tag_id
-                        )
-                        SELECT COUNT(*) FROM parent_chain WHERE tag_id = ?2
-                    ";
-
-                    let is_circular: i64 = conn.query_row(check_circular_sql, params![tag_id, dest_tag_id], |r| r.get(0)).unwrap_or(0);
-                    if is_circular > 0 {
-                        reply.error(libc::ELOOP); // Circular dependency
-                        return;
-                    }
-
-                    // Check if destination already has a tag with the new name
-                    let exists_check: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM tags WHERE parent_tag_id = ?1 AND name = ?2",
-                        params![dest_tag_id, newname_str],
-                        |r| r.get(0)
-                    ).unwrap_or(0);
-
-                    if exists_check > 0 {
-                        reply.error(libc::EEXIST);
-                        return;
-                    }
-
-                    // Update parent and name
-                    match conn.execute(
-                        "UPDATE tags SET parent_tag_id = ?1, name = ?2 WHERE tag_id = ?3",
-                        params![dest_tag_id, newname_str, tag_id]
-                    ) {
+                    // Move tag to different parent
+                    match repo.move_tag(tag_id, dest_tag_id, newname_str) {
                         Ok(_) => reply.ok(),
+                        Err(MagicError::State(msg)) if msg == "Circular dependency detected" => {
+                            reply.error(libc::ELOOP);
+                        }
+                        Err(MagicError::State(_)) => {
+                            reply.error(libc::EEXIST);
+                        }
                         Err(_) => reply.error(libc::EIO),
                     }
                 } else {
                     // Just rename within same parent
-                    // Check for conflicts
-                    let exists_check: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM tags WHERE parent_tag_id = ?1 AND name = ?2 AND tag_id != ?3",
-                        params![dest_tag_id, newname_str, tag_id],
-                        |r| r.get(0)
-                    ).unwrap_or(0);
-
-                    if exists_check > 0 {
-                        reply.error(libc::EEXIST);
-                        return;
-                    }
-
-                    match conn.execute(
-                        "UPDATE tags SET name = ?1 WHERE tag_id = ?2",
-                        params![newname_str, tag_id]
-                    ) {
+                    match repo.rename_tag(tag_id, newname_str) {
                         Ok(_) => reply.ok(),
+                        Err(MagicError::State(_)) => {
+                            reply.error(libc::EEXIST);
+                        }
                         Err(_) => reply.error(libc::EIO),
                     }
                 }
@@ -930,21 +903,17 @@ impl Filesystem for HollowDrive {
             }
 
             // Not a tag, try to handle as file
-            let tx = match conn.transaction() {
-                Ok(t) => t,
-                Err(_) => { reply.error(libc::EIO); return; }
-            };
-
-            // 2. Resolve File ID
-            let file_id_res: std::result::Result<u64, _> = tx.query_row(
-                "SELECT file_id FROM file_tags WHERE tag_id = ?1 AND display_name = ?2",
-                params![source_tag_id, name_str],
-                |r| r.get(0)
-            );
-
-            let file_id = match file_id_res {
+            let file_id_opt = match repo.get_file_id_in_tag(source_tag_id, name_str) {
                 Ok(id) => id,
                 Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+            let file_id = match file_id_opt {
+                Some(id) => id,
+                None => {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -953,48 +922,22 @@ impl Filesystem for HollowDrive {
             // 3. Perform File Operation
             if source_tag_id == dest_tag_id {
                 // CASE A: RENAME FILE (Same Folder)
-                // Check for conflicts
-                let conflict_check: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM file_tags WHERE tag_id = ?1 AND display_name = ?2",
-                    params![source_tag_id, newname_str],
-                    |r| r.get(0)
-                ).unwrap_or(0);
-
-                if conflict_check > 0 {
-                    reply.error(libc::EEXIST);
-                    return;
-                }
-
-                match tx.execute(
-                    "UPDATE file_tags SET display_name = ?1 WHERE file_id = ?2 AND tag_id = ?3",
-                    params![newname_str, file_id, source_tag_id]
-                ) {
-                    Ok(_) => {},
-                    Err(_) => { reply.error(libc::EIO); return; }
+                match repo.rename_file_in_tag(file_id, source_tag_id, newname_str) {
+                    Ok(_) => reply.ok(),
+                    Err(MagicError::State(_)) => {
+                        reply.error(libc::EEXIST);
+                    }
+                    Err(_) => reply.error(libc::EIO),
                 }
             } else {
                 // CASE B: MOVE FILE (Retagging)
-                // 1. Remove old link
-                if let Err(_) = tx.execute(
-                    "DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2",
-                    params![file_id, source_tag_id]
-                ) {
-                    reply.error(libc::EIO); return;
+                match repo.move_file_between_tags(file_id, source_tag_id, dest_tag_id, newname_str) {
+                    Ok(_) => reply.ok(),
+                    Err(MagicError::State(_)) => {
+                        reply.error(libc::EEXIST);
+                    }
+                    Err(_) => reply.error(libc::EIO),
                 }
-
-                // 2. Add new link
-                if let Err(_) = tx.execute(
-                    "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
-                    params![file_id, dest_tag_id, newname_str]
-                ) {
-                     reply.error(libc::EEXIST); return;
-                }
-            }
-
-            if let Ok(_) = tx.commit() {
-                reply.ok();
-            } else {
-                reply.error(libc::EIO);
             }
         } else {
             reply.error(libc::EIO);
@@ -1170,39 +1113,10 @@ impl Filesystem for HollowDrive {
         let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
         if let Some(conn) = conn_lock.as_mut() {
-            // Check if tag already exists with same name under same parent
-            let check_sql = if parent_tag_id.is_none() {
-                "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id IS NULL"
-            } else {
-                "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id = ?2"
-            };
-
-            let mut check_stmt = match conn.prepare(check_sql) {
-                Ok(stmt) => stmt,
-                Err(_) => { reply.error(libc::EIO); return; }
-            };
-
-            let exists = if parent_tag_id.is_none() {
-                check_stmt.exists(params![name_str]).unwrap_or(false)
-            } else {
-                check_stmt.exists(params![name_str, parent_tag_id]).unwrap_or(false)
-            };
-            if exists {
-                reply.error(libc::EEXIST);
-                return;
-            }
-
-            // Insert new tag
-            let insert_sql = "INSERT INTO tags (name, parent_tag_id) VALUES (?1, ?2)";
-            match conn.execute(insert_sql, params![name_str, parent_tag_id]) {
-                Ok(_) => {
-                    // Get the new tag_id
-                    let tag_id = conn.last_insert_rowid() as u64;
-
-                    // Generate persistent inode for the new tag
+            let repo = Repository::new(conn);
+            match repo.create_tag(name_str, parent_tag_id) {
+                Ok(tag_id) => {
                     let new_inode = InodeStore::db_id_to_inode(tag_id);
-
-                    // Return directory attributes
                     let ttl = Duration::from_secs(1);
                     let attr = fuser::FileAttr {
                         ino: new_inode,
@@ -1223,7 +1137,7 @@ impl Filesystem for HollowDrive {
                     };
                     reply.entry(&ttl, &attr, 0);
                 }
-                Err(rusqlite::Error::SqliteFailure(ref err, _)) if err.code == rusqlite::ErrorCode::ConstraintViolation => {
+                Err(MagicError::State(msg)) if msg == "Tag exists" => {
                     reply.error(libc::EEXIST);
                 }
                 Err(_) => {
@@ -1265,54 +1179,58 @@ impl Filesystem for HollowDrive {
         let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
         if let Some(conn) = conn_lock.as_mut() {
+            let repo = Repository::new(conn);
+
             // Get the tag_id we want to delete
-            let get_tag_sql = if parent_tag_id.is_none() {
-                "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id IS NULL"
-            } else {
-                "SELECT tag_id FROM tags WHERE name = ?1 AND parent_tag_id = ?2"
-            };
-
-            let tag_id_result: Result<u64, _> = if parent_tag_id.is_none() {
-                conn.query_row(get_tag_sql, params![name_str], |row| row.get(0))
-            } else {
-                conn.query_row(get_tag_sql, params![name_str, parent_tag_id], |row| row.get(0))
-            };
-
-            let tag_id = match tag_id_result {
+            let tag_id_opt = match repo.get_tag_id_by_name(name_str, parent_tag_id) {
                 Ok(id) => id,
                 Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+            let tag_id = match tag_id_opt {
+                Some(id) => id,
+                None => {
                     reply.error(libc::ENOENT);
                     return;
                 }
             };
 
-            // Check if tag has children
-            let children_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM tags WHERE parent_tag_id = ?1",
-                params![tag_id],
-                |row| row.get(0)
-            ).unwrap_or(0);
+            // Use repository methods to check emptiness
+            let has_children = match repo.has_child_tags(tag_id) {
+                Ok(val) => val,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
 
-            if children_count > 0 {
-                reply.error(libc::ENOTEMPTY); // "Directory not empty"
+            if has_children {
+                reply.error(libc::ENOTEMPTY);
                 return;
             }
 
-            // Check if tag has files
-            let files_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM file_tags WHERE tag_id = ?1",
-                params![tag_id],
-                |row| row.get(0)
-            ).unwrap_or(0);
+            let has_files = match repo.has_files(tag_id) {
+                Ok(val) => val,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
 
-            if files_count > 0 {
+            if has_files {
                 reply.error(libc::ENOTEMPTY);
                 return;
             }
 
             // Safe to delete
-            match conn.execute("DELETE FROM tags WHERE tag_id = ?1", params![tag_id]) {
+            match repo.delete_tag(tag_id) {
                 Ok(_) => reply.ok(),
+                Err(MagicError::State(msg)) if msg == "Directory not empty" => {
+                    reply.error(libc::ENOTEMPTY);
+                }
                 Err(_) => reply.error(libc::EIO),
             }
         } else {

@@ -20,39 +20,21 @@
     - [x] **The Router:** `lookup/readdir` routing for Persistent vs Ephemeral inodes.
     - [x] **Basic Views:** Listing `/magic/tags` and `/magic/tags/[tag]`.
     - [x] **Write Ops:** `create` (Import), `rename` (Retagging/Aliasing).
+- [x] **Phase 14: The Smart Hierarchy (Persistence v2.0)**
+    - [x] **Schema Upgrade:** Metadata columns added.
+    - [x] **Graph Logic:** `mkdir` (Create Node), `rmdir` (Prune Leaf).
+    - [x] **Graph Integrity:** Circular dependency detection during `mv`.
+    - [x] **Architectural Refactor:** Separated FUSE interface from SQL logic.
+    - [x] **Safety Patch:** Fixed `unwrap()` panic in `readdir`.
 
 ---
 
-## 🚧 Phase 14: The Smart Hierarchy (Active Focus)
-**Ref:** `SPEC_PERSISTENCE.md` v2.0
-**Goal:** Complete the translation of Unix Directory semantics into Graph Database operations.
-
-### 1. Schema Upgrade (Spec v2.0)
-- [ ] **Metadata Columns:** Update `tags` table with `color`, `icon`, `is_system`.
-- [ ] **System Tags:** Ensure migration creates `Inbox` (ID 1) and `Trash` (ID 2).
-
-### 2. Directory Structure Management (The Light Tree)
-*Enabling users to organize knowledge via `mkdir` and `rmdir`.*
-- [ ] **Hierarchical `mkdir`:** Implement handler in `HollowDrive`.
-    - *Logic:* `INSERT INTO tags (name, parent_tag_id) VALUES (...)`.
-    - *Constraint:* Prevent duplicate names in same parent.
-- [ ] **Hierarchical `rmdir`:** Implement handler.
-    - *Logic:* Check if empty (no sub-tags, no files). If safe, `DELETE FROM tags`.
-- [ ] **Tag Reparenting (`mv folder folder`):**
-    - *Logic:* Update `parent_tag_id` on the moved tag.
-    - *Constraint:* Check for circular dependency.
-
-### 3. The Inbox Workflow
-- [ ] **Landing Zone Logic:** `create/cp` into `/magic/inbox` maps to `tag_id=1`.
-- [ ] **Processing Logic:** `mv` from `/inbox` to `/finance` updates the `tag_id`.
-
----
-
-## 🛠️ Phase 15: Safety & Garbage Collection
+## 🚧 Phase 15: Safety & Garbage Collection (Active Focus)
 **Goal:** Ensure the "Permeable Garden" doesn't accumulate rot.
-- [ ] **The Wastebin:** Implement `rm` -> Move to `@trash` logic.
-- [ ] **The Incinerator:** Background job to physically delete files that have been in `@trash` > 30 days.
+- [ ] **The Wastebin:** Implement `rm` on a file -> Move to `@trash` logic (Soft Delete).
+- [ ] **The Incinerator:** Background job (Librarian) to physically delete files in `@trash` > 30 days.
 - [ ] **Orphan Collection:** Scan for `file_registry` entries with 0 tags and auto-tag as `@untagged`.
+- [ ] **Broken Link Detection:** Librarian check for DB entries pointing to non-existent physical files.
 
 ---
 
