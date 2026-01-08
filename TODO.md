@@ -38,8 +38,15 @@
 **Goal:** Ensure the "Permeable Garden" doesn't accumulate rot.
 - [x] **The Wastebin:** Implement `rm` on a file -> Move to `@trash` logic (Soft Delete).
 - [x] **The Scavenger:** Librarian job to scan for orphaned files (0 tags) and link them to `@trash`.
-- [ ] **The Incinerator:** Background job (Librarian) to physically delete files in `@trash` > 30 days.
+- [x] **The Incinerator:** Background job (Librarian) to physically delete files in `@trash` > 30 days.
 - [ ] **Broken Link Detection:** Librarian check for DB entries pointing to non-existent physical files.
+
+## 🔒 Phase 16: The Wastebin (Completed)
+**Goal:** Implement unlink with full virtual alias support and soft delete.
+- [x] **Safety Check:** Persistent tag boundaries enforced.
+- [x] **Resolution:** Virtual aliases ("file (1).txt") handled correctly.
+- [x] **Soft Delete:** Semantic link removed, data preserved.
+- [x] **Protection:** Non-tag views (`/search`, `/mirror`) protected.
 
 ---
 
