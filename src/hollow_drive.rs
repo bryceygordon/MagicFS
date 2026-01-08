@@ -1280,7 +1280,7 @@ impl Filesystem for HollowDrive {
                     ";
 
                     if let Ok(mut stmt) = conn.prepare(sql) {
-                        if let Ok(rows) = stmt.query_map([tag_id, &base_name], |row| {
+                        if let Ok(rows) = stmt.query_map(params![tag_id, base_name], |row| {
                             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
                         }) {
                             // Find the Nth occurrence
