@@ -317,6 +317,20 @@ impl<'a> Repository<'a> {
         Ok(())
     }
 
+    /// Unlinks a file from a specific tag (Soft Delete).
+    /// Does NOT delete the physical file or registry entry.
+    pub fn unlink_file(&self, tag_id: u64, file_id: u64) -> Result<()> {
+        let count = self.conn.execute(
+            "DELETE FROM file_tags WHERE tag_id = ?1 AND file_id = ?2",
+            params![tag_id, file_id],
+        )?;
+
+        if count == 0 {
+            return Err(MagicError::State("Link not found".into()));
+        }
+        Ok(())
+    }
+
     /// Get tag ID by name and parent
     pub fn get_tag_id_by_name(&self, name: &str, parent_id: Option<u64>) -> Result<Option<u64>> {
         let sql = if parent_id.is_none() {

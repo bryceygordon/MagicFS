@@ -1237,4 +1237,50 @@ impl Filesystem for HollowDrive {
             reply.error(libc::EIO);
         }
     }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEmpty) {
+        // 1. Check Context: Must be a Persistent Tag
+        if !InodeStore::is_persistent(parent) {
+            // /search and /mirror are Read-Only for deletion
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => { reply.error(libc::EINVAL); return; }
+        };
+
+        let tag_id = InodeStore::inode_to_db_id(parent);
+
+        let state_guard = self.state.read().unwrap();
+        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+        if let Some(conn) = conn_lock.as_mut() {
+            let repo = Repository::new(conn);
+
+            // 2. Resolve File ID within this specific tag
+            let file_id = match repo.get_file_id_in_tag(tag_id, name_str) {
+                Ok(Some(id)) => id,
+                Ok(None) => { reply.error(libc::ENOENT); return; }
+                Err(e) => {
+                    tracing::error!("[HollowDrive] Unlink resolution error: {}", e);
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+            // 3. Execute Soft Delete
+            match repo.unlink_file(tag_id, file_id) {
+                Ok(_) => reply.ok(),
+                Err(MagicError::State(_)) => reply.error(libc::ENOENT),
+                Err(e) => {
+                    tracing::error!("[HollowDrive] Unlink failed: {}", e);
+                    reply.error(libc::EIO);
+                }
+            }
+        } else {
+            reply.error(libc::EIO);
+        }
+    }
 }
