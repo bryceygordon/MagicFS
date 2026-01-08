@@ -1257,15 +1257,16 @@ impl Filesystem for HollowDrive {
         let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
         if let Some(conn) = conn_lock.as_mut() {
-            let repo = Repository::new(conn);
-
             // 2. Resolve File ID within this specific tag (with virtual alias support)
             // Strategy: Try exact match first, then virtual alias resolution
             let mut target_file_id = None;
 
             // Attempt 1: Exact Match
-            if let Ok(Some(file_id)) = repo.get_file_id_in_tag(tag_id, name_str) {
-                target_file_id = Some(file_id);
+            {
+                let repo = Repository::new(conn);
+                if let Ok(Some(file_id)) = repo.get_file_id_in_tag(tag_id, name_str) {
+                    target_file_id = Some(file_id);
+                }
             }
 
             // Attempt 2: Virtual Alias Resolution (if exact match failed)
@@ -1306,6 +1307,7 @@ impl Filesystem for HollowDrive {
             };
 
             // 3. Execute Soft Delete
+            let repo = Repository::new(conn);
             match repo.unlink_file(tag_id, file_id) {
                 Ok(_) => reply.ok(),
                 Err(MagicError::State(_)) => reply.error(libc::ENOENT),
