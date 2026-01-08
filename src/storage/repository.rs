@@ -372,4 +372,27 @@ impl<'a> Repository<'a> {
         )?;
         Ok(count > 0)
     }
+
+    /// War Mode: Toggle database performance settings
+    ///
+    /// # Arguments
+    /// * `war_mode` - If true, enables maximum throughput settings (unsafe).
+    ///                If false, enables safe, durable settings.
+    pub fn set_performance_mode(&mut self, war_mode: bool) -> Result<()> {
+        if war_mode {
+            tracing::warn!("[Repository] 🔥 ENTERING WAR MODE (Max Performance)");
+            // Maximum throughput: No disk sync, memory journal
+            self.conn.execute("PRAGMA synchronous = OFF", [])?;
+            self.conn.execute("PRAGMA journal_mode = MEMORY", [])?;
+        } else {
+            tracing::info!("[Repository] 🛡️ ENTERING PEACE MODE (Safe)");
+            // Safe mode: Normal sync, WAL for concurrency
+            // First checkpoint to flush memory journal to disk
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", [])?;
+            // Then switch to safe settings
+            self.conn.execute("PRAGMA synchronous = NORMAL", [])?;
+            self.conn.execute("PRAGMA journal_mode = WAL", [])?;
+        }
+        Ok(())
+    }
 }

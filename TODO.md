@@ -26,6 +26,11 @@
     - [x] **Graph Integrity:** Circular dependency detection during `mv`.
     - [x] **Architectural Refactor:** Separated FUSE interface from SQL logic.
     - [x] **Safety Patch:** Fixed `unwrap()` panic in `readdir`.
+- [x] **Phase 19: Performance Engineering**
+    - [x] **War Mode:** Unsafe SQLite optimizations (`synchronous=OFF`) during initial bulk scan.
+    - [x] **Batching:** Vectorized embedding (Vec<String>) and transactional inserts.
+    - [x] **State Machine:** `Booting` -> `Indexing` -> `Monitoring` transitions.
+    - [x] **Handover Protocol:** Safe `WAL` checkpointing before steady state.
 
 ---
 

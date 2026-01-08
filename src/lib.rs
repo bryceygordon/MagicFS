@@ -8,6 +8,6 @@ pub mod state;
 pub mod error;
 pub mod storage;
 
-pub use state::{GlobalState, SharedState, SearchResult};
+pub use state::{GlobalState, SharedState, SearchResult, SystemState};
 pub use error::{Result, MagicError};
 pub use storage::{init_connection, Repository};

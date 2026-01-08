@@ -1,5 +1,5 @@
 // FILE: src/librarian.rs
-use crate::state::SharedState;
+use crate::state::{SharedState, SystemState};
 use crate::error::Result;
 use notify::{RecommendedWatcher, Watcher, Event, EventKind, RecursiveMode};
 use std::sync::{Arc, Mutex, mpsc};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 struct IgnoreManager {
     rules: HashMap<PathBuf, HashSet<String>>,
@@ -81,12 +82,85 @@ impl Librarian {
         let mut ignore_manager = IgnoreManager::new();
         for path_str in &paths_vec { ignore_manager.load_rules_for_root(Path::new(path_str)); }
 
-        // Initial Scan
+        // ==== WAR MODE PHASE 1: INITIAL BULK INDEXING ====
+        tracing::info!("[Librarian] 🚀 Starting initial bulk scan");
+
+        // 1. Engage War Mode
+        {
+            let state_guard = state.read().unwrap();
+            let mut conn_lock = state_guard.db_connection.lock().unwrap();
+            if let Some(conn) = conn_lock.as_mut() {
+                let mut repo = crate::storage::Repository::new(conn);
+                if let Err(e) = repo.set_performance_mode(true) {
+                    tracing::error!("[Librarian] Failed to enter War Mode: {}", e);
+                }
+            }
+        }
+
+        // 2. Update System State
+        state.read().unwrap().system_state.store(SystemState::Indexing.as_u8(), Ordering::Relaxed);
+
+        // 3. Purge orphaned records
         let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
+
+        // 4. Perform bulk scan for all roots
         for path_str in &paths_vec {
             let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
         }
 
+        // 5. Wait for Indexing Queue to Drain
+        tracing::info!("[Librarian] 🔄 Waiting for initial indexing queue to drain...");
+        let mut empty_ticks = 0;
+        loop {
+            thread::sleep(Duration::from_millis(100));
+
+            let queue_len = {
+                let state_guard = state.read().unwrap();
+                let files_to_index = state_guard.files_to_index.lock().unwrap();
+                files_to_index.len()
+            };
+
+            // Check Oracle activity (simplified - we'll check if Oracle thread is still running)
+            // In a production system, we'd have proper job tracking
+            let oracle_active = {
+                let state_guard = state.read().unwrap();
+                // Check if embedding_tx exists (actor is alive)
+                let tx_guard = state_guard.embedding_tx.read().unwrap();
+                tx_guard.is_some()
+            };
+
+            if queue_len == 0 {
+                empty_ticks += 1;
+                // Wait for 2 consecutive empty ticks to ensure stability
+                if empty_ticks >= 2 && oracle_active {
+                    break;
+                }
+            } else {
+                empty_ticks = 0;
+                if queue_len % 100 == 0 {
+                    tracing::info!("[Librarian] Still draining queue... {} items remaining", queue_len);
+                }
+            }
+        }
+
+        // 6. Disengage War Mode - Enter Peace Mode
+        tracing::info!("[Librarian] 🛡️ Initial indexing complete. Switching to Peace Mode.");
+        {
+            let state_guard = state.read().unwrap();
+            let mut conn_lock = state_guard.db_connection.lock().unwrap();
+            if let Some(conn) = conn_lock.as_mut() {
+                let mut repo = crate::storage::Repository::new(conn);
+                if let Err(e) = repo.set_performance_mode(false) {
+                    tracing::error!("[Librarian] Failed to exit War Mode: {}", e);
+                }
+            }
+        }
+
+        // Update System State
+        state.read().unwrap().system_state.store(SystemState::Monitoring.as_u8(), Ordering::Relaxed);
+        tracing::info!("[Librarian] 🛡️ Peace Mode active. Starting file watcher...");
+
+        // ==== PHASE 2: STEADY-STATE MONITORING ====
         let (tx, rx) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default()).unwrap();
         for path in &paths_vec { let _ = watcher.watch(Path::new(path), RecursiveMode::Recursive); }
@@ -107,7 +181,7 @@ impl Librarian {
                 _ => {
                     if !event_queue.is_empty() && last_activity.elapsed() >= debounce {
                         let events = std::mem::take(&mut event_queue);
-                        
+
                         // 1. Reload Ignore Rules
                         for (path, _) in &events {
                             if path.file_name().map_or(false, |n| n == ".magicfsignore") {
@@ -118,7 +192,7 @@ impl Librarian {
                         }
 
                         // 2. Process Events
-                        for (_path, event) in events { 
+                        for (_path, event) in events {
                             let _ = Self::handle_file_event(&Ok(event), &state, &ignore_manager, &paths_vec);
                         }
                     }

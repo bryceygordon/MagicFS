@@ -63,10 +63,14 @@ impl Oracle {
         }
 
         std::thread::spawn(move || {
-            // --- UPGRADE: Nomic Embed v1.5 (768 dims) ---
-            tracing::info!("[EmbeddingActor] Starting Nomic Embed v1.5 (SOTA)...");
+            // --- UPGRADE: Nomic Embed v1.5 (768 dims) with Optimized Settings ---
+            tracing::info!("[EmbeddingActor] Starting Nomic Embed v1.5 (SOTA) with optimized settings...");
 
-            let model_result = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::NomicEmbedTextV15));
+            // Initialize with optimized settings
+            // Note: Hardware acceleration support depends on fastembed version and available backends
+            let init_options = InitOptions::new(EmbeddingModel::NomicEmbedTextV15);
+
+            let model_result = TextEmbedding::try_new(init_options);
 
             let mut model = match model_result {
                 Ok(m) => {

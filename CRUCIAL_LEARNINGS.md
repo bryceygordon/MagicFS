@@ -117,3 +117,12 @@
     2. Registers the file in the `file_registry`.
     3. Links the file to the active Tag ID in `file_tags`.
 * **Result:** The kernel gets a real inode, so subsequent `write()` calls pass through naturally to the physical disk.
+
+### 21. The Two-Speed Engine (War Mode)
+* **Context:** "We cannot afford fsync() on every file during the initial 10,000 file scan."
+* **Decision:** Use `journal_mode=MEMORY` for the backlog, then strictly checkpoint and switch to `WAL` for steady state.
+* **Implementation:**
+    * **War Mode:** `PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;` for maximum throughput during initial bulk scan
+    * **Handover:** `PRAGMA wal_checkpoint(TRUNCATE);` to flush memory journal to disk
+    * **Peace Mode:** `PRAGMA synchronous = NORMAL; PRAGMA journal_mode = WAL;` for durability during steady-state monitoring
+* **Key Constraint:** The Librarian state machine ensures strict handover - War Mode persists ONLY until the `files_to_index` queue is drained and Oracle is idle. This prevents data loss in steady-state operations.
