@@ -1259,13 +1259,48 @@ impl Filesystem for HollowDrive {
         if let Some(conn) = conn_lock.as_mut() {
             let repo = Repository::new(conn);
 
-            // 2. Resolve File ID within this specific tag
-            let file_id = match repo.get_file_id_in_tag(tag_id, name_str) {
-                Ok(Some(id)) => id,
-                Ok(None) => { reply.error(libc::ENOENT); return; }
-                Err(e) => {
-                    tracing::error!("[HollowDrive] Unlink resolution error: {}", e);
-                    reply.error(libc::EIO);
+            // 2. Resolve File ID within this specific tag (with virtual alias support)
+            // Strategy: Try exact match first, then virtual alias resolution
+            let mut target_file_id = None;
+
+            // Attempt 1: Exact Match
+            if let Ok(Some(file_id)) = repo.get_file_id_in_tag(tag_id, name_str) {
+                target_file_id = Some(file_id);
+            }
+
+            // Attempt 2: Virtual Alias Resolution (if exact match failed)
+            if target_file_id.is_none() {
+                if let Some((base_name, index)) = Self::parse_virtual_name(name_str) {
+                    // Query for all files with base_name in this tag
+                    let sql = "
+                        SELECT ft.file_id, ft.display_name
+                        FROM file_tags ft
+                        WHERE ft.tag_id = ?1 AND ft.display_name = ?2
+                        ORDER BY ft.file_id ASC
+                    ";
+
+                    if let Ok(mut stmt) = conn.prepare(sql) {
+                        if let Ok(rows) = stmt.query_map([tag_id, &base_name], |row| {
+                            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+                        }) {
+                            // Find the Nth occurrence
+                            for (i, row) in rows.enumerate() {
+                                if let Ok((file_id, _display_name)) = row {
+                                    if i == index {
+                                        target_file_id = Some(file_id);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let file_id = match target_file_id {
+                Some(id) => id,
+                None => {
+                    reply.error(libc::ENOENT);
                     return;
                 }
             };
