@@ -173,6 +173,10 @@ impl Librarian {
         let mut event_queue: HashMap<PathBuf, Event> = HashMap::new();
         let mut last_activity = Instant::now();
 
+        // Incinerator timing: Run every 60 seconds
+        let incinerator_interval = Duration::from_secs(60);
+        let mut last_incinerator_run = Instant::now();
+
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ok(event)) => {
@@ -182,6 +186,13 @@ impl Librarian {
                     }
                 }
                 _ => {
+                    // Check if it's time to run the incinerator
+                    if last_incinerator_run.elapsed() >= incinerator_interval {
+                        tracing::debug!("[Librarian] Running periodic Incinerator check...");
+                        let _ = Self::run_incinerator(&state);
+                        last_incinerator_run = Instant::now();
+                    }
+
                     if !event_queue.is_empty() && last_activity.elapsed() >= debounce {
                         let events = std::mem::take(&mut event_queue);
 
@@ -242,6 +253,83 @@ impl Librarian {
                     let repo = crate::storage::Repository::new(conn);
                     let _ = repo.link_file(file_id, trash_id, name);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn run_incinerator(state: &SharedState) -> Result<()> {
+        const TRASH_RETENTION_DAYS: i64 = 30;
+        const SECONDS_PER_DAY: i64 = 86400;
+
+        let state_guard = state.read().unwrap();
+        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+        if let Some(conn) = conn_lock.as_mut() {
+            // A. Ensure 'trash' tag exists
+            let trash_id = {
+                let repo = crate::storage::Repository::new(conn);
+                match repo.get_tag_id_by_name("trash", None)? {
+                    Some(id) => id,
+                    None => return Ok(()), // No trash tag means nothing to incinerate
+                }
+            };
+
+            // B. Get files older than retention period
+            let old_files = {
+                let repo = crate::storage::Repository::new(conn);
+                repo.get_old_trash_files(trash_id, TRASH_RETENTION_DAYS * SECONDS_PER_DAY)?
+            };
+
+            if !old_files.is_empty() {
+                tracing::info!("[Incinerator] Found {} files older than {} days. Hard deleting.", old_files.len(), TRASH_RETENTION_DAYS);
+
+                for (file_id, display_name, added_at) in old_files {
+                    // Log what we're about to incinerate
+                    let current_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                    let age_days = (current_time - added_at) / SECONDS_PER_DAY;
+                    tracing::info!("[Incinerator] 🔥 Burning file_id={}, name={}, age={} days", file_id, display_name, age_days);
+
+                    // Step 1: Get physical file path before deletion
+                    let abs_path = match conn.query_row(
+                        "SELECT abs_path FROM file_registry WHERE file_id = ?1",
+                        [file_id],
+                        |r| r.get::<_, String>(0)
+                    ) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            tracing::error!("[Incinerator] Failed to get path for file_id={}: {}", file_id, e);
+                            continue; // Skip this file, try next one
+                        }
+                    };
+
+                    // Step 2: Delete physical file from disk
+                    match std::fs::remove_file(&abs_path) {
+                        Ok(()) => {
+                            tracing::debug!("[Incinerator] Deleted physical file: {}", abs_path);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            tracing::warn!("[Incinerator] Physical file already gone: {}", abs_path);
+                        }
+                        Err(e) => {
+                            tracing::error!("[Incinerator] Failed to delete physical file {}: {}", abs_path, e);
+                            // Continue with database cleanup anyway - the file is in trash, we should clean up the record
+                        }
+                    }
+
+                    // Step 3: Clean up database entries (registry + tags via cascade)
+                    let repo = crate::storage::Repository::new(conn);
+                    if let Err(e) = repo.delete_file_by_id(file_id) {
+                        tracing::error!("[Incinerator] Failed to delete file_id={} from registry: {}", file_id, e);
+                    } else {
+                        tracing::debug!("[Incinerator] Successfully incinerated file_id={}", file_id);
+                    }
+                }
+
+                tracing::info!("[Incinerator] Incineration complete.");
             }
         }
         Ok(())

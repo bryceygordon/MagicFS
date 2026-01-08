@@ -434,4 +434,28 @@ impl<'a> Repository<'a> {
         )?;
         Ok(())
     }
+
+    /// Incinerator: Get files in trash that are older than specified threshold.
+    /// Returns tuples of (file_id, display_name, added_at_timestamp).
+    pub fn get_old_trash_files(&self, trash_tag_id: u64, older_than_seconds: i64) -> Result<Vec<(u64, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ft.file_id, ft.display_name, ft.added_at
+             FROM file_tags ft
+             WHERE ft.tag_id = ?1 AND ft.added_at < ?2"
+        )?;
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let cutoff_time = current_time - older_than_seconds;
+
+        let rows = stmt.query_map(params![trash_tag_id, cutoff_time], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+
+        let mut old_files = Vec::new();
+        for r in rows { old_files.push(r?); }
+        Ok(old_files)
+    }
 }
