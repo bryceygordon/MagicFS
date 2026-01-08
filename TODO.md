@@ -34,12 +34,15 @@
 
 ---
 
-## 🚧 Phase 15: Safety & Garbage Collection (Active Focus)
+## ✅ Phase 15: Safety & Garbage Collection (COMPLETE)
 **Goal:** Ensure the "Permeable Garden" doesn't accumulate rot.
 - [x] **The Wastebin:** Implement `rm` on a file -> Move to `@trash` logic (Soft Delete).
 - [x] **The Scavenger:** Librarian job to scan for orphaned files (0 tags) and link them to `@trash`.
 - [x] **The Incinerator:** Background job (Librarian) to physically delete files in `@trash` > 30 days.
-- [ ] **Broken Link Detection:** Librarian check for DB entries pointing to non-existent physical files.
+- [x] **Broken Link Detection:** Librarian check for DB entries pointing to non-existent physical files.
+    - [x] **Offline Detection:** `purge_orphaned_records()` runs on startup (Scenario A ✅)
+    - [x] **Real-time Detection:** `handle_file_event(Remove)` → `Indexer::remove_file()` via inotify (Scenario B ✅)
+    - [x] **Test Coverage:** `tests/cases/test_32_broken_links.py` validates both mechanisms
 
 ## 🔒 Phase 16: The Wastebin (Completed)
 **Goal:** Implement unlink with full virtual alias support and soft delete.
