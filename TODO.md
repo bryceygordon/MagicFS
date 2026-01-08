@@ -37,7 +37,7 @@
 ## 🚧 Phase 15: Safety & Garbage Collection (Active Focus)
 **Goal:** Ensure the "Permeable Garden" doesn't accumulate rot.
 - [x] **The Wastebin:** Implement `rm` on a file -> Move to `@trash` logic (Soft Delete).
-- [ ] **The Scavenger:** Librarian job to scan for orphaned files (0 tags) and link them to `@trash`.
+- [x] **The Scavenger:** Librarian job to scan for orphaned files (0 tags) and link them to `@trash`.
 - [ ] **The Incinerator:** Background job (Librarian) to physically delete files in `@trash` > 30 days.
 - [ ] **Broken Link Detection:** Librarian check for DB entries pointing to non-existent physical files.
 
