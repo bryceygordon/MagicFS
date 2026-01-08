@@ -64,8 +64,15 @@ echo "✅ Unit Tests Passed"
 # 3. Run Test Suite
 echo "[Suite] Starting Isolation Runner..."
 
-# Sort tests to ensure deterministic order
-for test_file in $(ls tests/cases/*.py | sort); do
+# Sort tests to run from newest to oldest, but ensure test_99 runs last
+# Get all test files except test_99, sort them in reverse order
+mapfile -t REGULAR_TESTS < <(ls tests/cases/test_*.py 2>/dev/null | grep -v test_99 | sort -r)
+# Get test_99 files specifically
+mapfile -t TEST_99_FILES < <(ls tests/cases/test_99_*.py 2>/dev/null | sort)
+# Combine arrays
+ALL_TESTS=("${REGULAR_TESTS[@]}" "${TEST_99_FILES[@]}")
+
+for test_file in "${ALL_TESTS[@]}"; do
     restore_term
     TEST_NAME=$(basename "$test_file")
     echo -e "\n>>> 🧪 Running: $TEST_NAME"
