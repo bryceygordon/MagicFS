@@ -103,6 +103,9 @@ impl Librarian {
         // 3. Purge orphaned records
         let _ = Self::purge_orphaned_records(&state, &ignore_manager, &paths_vec);
 
+        // 3.5 Run Scavenger to move orphans to trash
+        let _ = Self::run_scavenger(&state);
+
         // 4. Perform bulk scan for all roots
         for path_str in &paths_vec {
             let _ = Self::scan_directory_for_files(&state, Path::new(path_str), &ignore_manager, &paths_vec);
@@ -199,6 +202,49 @@ impl Librarian {
                 }
             }
         }
+    }
+
+    fn run_scavenger(state: &SharedState) -> Result<()> {
+        let state_guard = state.read().unwrap();
+        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+        if let Some(conn) = conn_lock.as_mut() {
+            // A. Ensure 'trash' tag exists (first, before borrowing mutably for repo)
+            let trash_id = {
+                let repo = crate::storage::Repository::new(conn);
+                match repo.get_tag_id_by_name("trash", None)? {
+                    Some(id) => id,
+                    None => repo.create_tag("trash", None)?,
+                }
+            };
+
+            // B. Find Orphans
+            let orphans = {
+                let repo = crate::storage::Repository::new(conn);
+                repo.get_orphans(100)? // Process in batches of 100
+            };
+
+            if !orphans.is_empty() {
+                tracing::info!("[Scavenger] Found {} orphaned files. Moving to @trash.", orphans.len());
+
+                for file_id in orphans {
+                    // We need the filename to link it
+                    let filename = conn.query_row(
+                        "SELECT abs_path FROM file_registry WHERE file_id = ?1",
+                        [file_id],
+                        |r| r.get::<_, String>(0)
+                    ).unwrap_or_else(|_| "unknown_orphan".to_string());
+
+                    let name = std::path::Path::new(&filename)
+                        .file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+
+                    // Link file to trash tag
+                    let repo = crate::storage::Repository::new(conn);
+                    let _ = repo.link_file(file_id, trash_id, name);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn purge_orphaned_records(state: &SharedState, ignore_manager: &IgnoreManager, watch_roots: &[String]) -> Result<()> {
@@ -303,6 +349,7 @@ impl Librarian {
                                     tracing::info!("[Librarian] Rescanning root: {}", root);
                                     let _ = Self::scan_directory_for_files(state, Path::new(root), ignore_manager, watch_roots);
                                 }
+                                let _ = Self::run_scavenger(&state);
                                 return Ok(());
                             }
                         }

@@ -409,4 +409,29 @@ impl<'a> Repository<'a> {
         }
         Ok(())
     }
+
+    /// Scavenger: Find files that have NO tags (Orphans).
+    /// Returns a vector of file_ids that are orphaned.
+    pub fn get_orphans(&self, limit: usize) -> Result<Vec<u64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fr.file_id FROM file_registry fr
+             LEFT JOIN file_tags ft ON fr.file_id = ft.file_id
+             WHERE ft.file_id IS NULL
+             LIMIT ?1"
+        )?;
+
+        let rows = stmt.query_map(params![limit], |row| row.get(0))?;
+        let mut orphans = Vec::new();
+        for r in rows { orphans.push(r?); }
+        Ok(orphans)
+    }
+
+    /// Helper to link a file to a tag (used by Scavenger).
+    pub fn link_file(&self, file_id: u64, tag_id: u64, name: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
+            params![file_id, tag_id, name]
+        )?;
+        Ok(())
+    }
 }
