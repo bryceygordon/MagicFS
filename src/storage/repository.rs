@@ -419,8 +419,8 @@ impl<'a> Repository<'a> {
             tracing::info!("[Repository] 🛡️ ENTERING PEACE MODE (Safe)");
             // Safe mode: Normal sync, WAL for concurrency
             // First checkpoint to flush memory journal to disk
-            // wal_checkpoint is a special PRAGMA that performs a checkpoint, execute() is appropriate here
-            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", [])?;
+            // wal_checkpoint returns data (busy, log, checkpointed), so we must consume it
+            self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
             // Then switch to safe settings using pragma_update()
             self.conn.pragma_update(None, "synchronous", "NORMAL")?;
             self.conn.pragma_update(None, "journal_mode", "WAL")?;
