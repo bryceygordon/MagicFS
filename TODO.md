@@ -1,4 +1,4 @@
-IO# MagicFS Roadmap & Charter
+IOIOIO# MagicFS Roadmap & Charter
 
 > "The goal is not just to search; it is to maintain the illusion of a physical, infinite drive."
 
@@ -103,3 +103,5 @@ IO# MagicFS Roadmap & Charter
 ## ✅ Phase 22: Stability & Harness Hardening
 - [x] **WAL-Safe Testing:** Converted all Python tests to use `subprocess` for DB reads.
 - [x] **Omnibus Repair:** Fixed permissions, paths, and logic gaps in the new root hierarchy.
+
+- [x] **Phase 23: Transient File Suppression:** Librarian filters `.part/.tmp`, Indexer handles vanished files gracefully.

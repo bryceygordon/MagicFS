@@ -10,6 +10,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+// Helper function to detect transient files that should be ignored
+fn is_transient_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        // Common transient formats from browsers and editors
+        return matches!(ext, "part" | "tmp" | "crdownload" | "swp" | "lock" | "download" | "swx" | "swo");
+    }
+    // Special handling for vim backup files (end in ~)
+    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        return name.ends_with('~');
+    }
+    false
+}
+
 struct IgnoreManager {
     rules: HashMap<PathBuf, HashSet<String>>,
 }
@@ -400,11 +413,16 @@ impl Librarian {
             .filter_entry(|e| {
                 if e.path_is_symlink() { return false; }
                 !ignore_manager.is_ignored(e.path(), watch_roots)
-            }) 
+            })
         {
             if let Ok(entry) = entry {
                 let path = entry.path();
                 if path.is_file() {
+                    // --- NEW FILTER: Skip transient files in bulk scan ---
+                    if is_transient_file(path) {
+                        continue;
+                    }
+                    // -----------------------------------------------------
                     let path_str = path.to_string_lossy().to_string();
                     let fs_mtime = path.metadata().ok().and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
@@ -468,17 +486,24 @@ impl Librarian {
                 if ignore_manager.is_ignored(path, watch_roots) { continue; }
                 if path.is_symlink() { continue; }
 
+                // --- NEW FILTER: Ignore transient files ---
+                if is_transient_file(path) {
+                    tracing::debug!("[Librarian] Ignoring transient file: {:?}", path);
+                    continue;
+                }
+                // ------------------------------------------
+
                 let path_str = path.to_string_lossy().to_string();
                 match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => { 
-                        if path.is_file() { 
+                    EventKind::Create(_) | EventKind::Modify(_) => {
+                        if path.is_file() {
                             tracing::debug!("[Librarian] Queueing index: {}", path_str);
-                            queue.push(path_str); 
-                        } 
+                            queue.push(path_str);
+                        }
                     }
-                    EventKind::Remove(_) => { 
+                    EventKind::Remove(_) => {
                         tracing::debug!("[Librarian] Queueing delete: {}", path_str);
-                        queue.push(format!("DELETE:{}", path_str)); 
+                        queue.push(format!("DELETE:{}", path_str));
                     }
                     _ => {}
                 }

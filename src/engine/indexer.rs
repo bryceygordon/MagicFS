@@ -121,14 +121,22 @@ impl Indexer {
     }
 
     async fn extract_with_retry(path: &str) -> Result<String> {
-        let max_retries = 20; 
+        let max_retries = 20;
         let mut last_error = None;
 
         for attempt in 1..=max_retries {
             let path_owned = path.to_string();
-            
+            let path_obj = std::path::Path::new(path);
+
+            // --- NEW CHECK: ABORT IF VANISHED ---
+            if !path_obj.exists() {
+                tracing::debug!("[Indexer] File vanished during processing (transient?): {}", path);
+                return Ok(String::new()); // Treat as empty, do not error
+            }
+            // ------------------------------------
+
             if let Ok(m) = std::fs::metadata(path) {
-                if m.len() == 0 { 
+                if m.len() == 0 {
                     if attempt < max_retries {
                         tracing::debug!("[Indexer] File {} is 0 bytes (attempt {}/{}), waiting...", path, attempt, max_retries);
                         tokio::time::sleep(Duration::from_millis(100)).await;
