@@ -16,9 +16,10 @@ impl Indexer {
     /// 3. Register file in DB
     /// 4. Generate embeddings (BATCHED)
     /// 5. Insert embeddings (TRANSACTIONAL)
+    /// 6. Phase 17: Auto-apply Tag ID 1 (Inbox) if file is in system inbox
     pub async fn index_file(state: SharedState, file_path: String) -> Result<()> {
         tracing::info!("[Indexer] Processing: {}", file_path);
-        
+
         // 1. Extraction (with retries for file locks AND partial writes)
         let text_content = match Self::extract_with_retry(&file_path).await {
             Ok(t) => t,
@@ -38,9 +39,9 @@ impl Indexer {
 
         // 2. Chunking
         let chunks = crate::storage::text_extraction::chunk_text(&text_content);
-        if chunks.is_empty() { 
+        if chunks.is_empty() {
             tracing::warn!("[Indexer] File has content but produced 0 chunks: {}", file_path);
-            return Ok(()); 
+            return Ok(());
         }
 
         tracing::debug!("[Indexer] {} split into {} chunks", file_path, chunks.len());
@@ -51,12 +52,11 @@ impl Indexer {
             // Acquire mutable lock for registration
             let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            
-            // [FIXED] Removed unused mut here
+
             let repo = Repository::new(conn);
 
             // Mock inode logic
-            let inode = file_path.len() as u64 + 0x100000; 
+            let inode = file_path.len() as u64 + 0x100000;
             let metadata = std::fs::metadata(&file_path).map_err(MagicError::Io)?;
             let mtime = metadata.modified().map_err(MagicError::Io)?.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
             let size = metadata.len();
@@ -65,7 +65,7 @@ impl Indexer {
             let fid = repo.register_file(
                 &file_path, inode, mtime, size, is_dir
             )?;
-            
+
             repo.delete_embeddings_for_file(fid)?;
             (fid, inode)
         };
@@ -74,20 +74,46 @@ impl Indexer {
         // is_query = false (We are indexing DOCUMENTS)
         // This sends ALL chunks to the GPU/CPU in one go.
         let embeddings_batch = request_embedding_batch(&state, chunks, false).await?;
-        
+
         // 5. Insert Embeddings (TRANSACTIONAL)
         {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             // We need a mutable connection for transactions
             let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            
+
             // 'repo' needs to be mut because insert_embeddings_batch is &mut self
             let mut repo = Repository::new(conn);
 
             if let Err(e) = repo.insert_embeddings_batch(file_id, embeddings_batch) {
                 tracing::warn!("[Indexer] Failed to insert batch: {}", e);
             }
+
+            // --- PHASE 17: AUTO-TAG INBOX FILES ---
+            // Check if file is in system inbox and auto-link to Tag ID 1
+            let is_in_inbox = {
+                let inbox_path_guard = state_guard.system_inbox_path.lock().unwrap();
+                if let Some(inbox_path) = inbox_path_guard.as_ref() {
+                    file_path.starts_with(inbox_path)
+                } else {
+                    false
+                }
+            };
+
+            if is_in_inbox {
+                tracing::info!("[Indexer] File in system inbox, auto-linking to Tag ID 1 (inbox)");
+                let filename = std::path::Path::new(&file_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+
+                if let Err(e) = repo.link_file(file_id, 1, filename) {
+                    tracing::warn!("[Indexer] Failed to auto-link file to inbox tag: {}", e);
+                } else {
+                    tracing::debug!("[Indexer] Successfully linked file_id={} to tag_id=1", file_id);
+                }
+            }
+            // --- END PHASE 17 ---
         }
 
         // 6. Invalidate Caches

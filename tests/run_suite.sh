@@ -19,12 +19,18 @@ WATCH_DIR="/tmp/magicfs-test-data"
 DB_PATH="/tmp/.magicfs_nomic/index.db"
 BINARY="./target/debug/magicfs"
 LOG_FILE="tests/magicfs.log"
+# NEW: System data directory for Phase 17
+SYSTEM_DATA_DIR="/tmp/magicfs-test-system"
 
 # FIX: Add 'tests' directory to PYTHONPATH so cases can import 'common'
 export PYTHONPATH=$(pwd)/tests
 
 # FIX: Export the log file path so common.py reads the CORRECT log on failure
 export MAGICFS_LOG_FILE=$(pwd)/"$LOG_FILE"
+
+# NEW: Export system data directory for Phase 17
+export MAGICFS_DATA_DIR="$SYSTEM_DATA_DIR"
+export RUST_LOG=debug
 
 # Keep sudo alive
 sudo -v
@@ -36,7 +42,7 @@ cleanup_environment() {
     sudo pkill -15 -x magicfs 2>/dev/null
     # sleep 0.5
     sudo pkill -9 -x magicfs 2>/dev/null
-    
+
     # 2. Force Unmount (The Zombie Fix)
     if mount | grep -q "$MOUNT_POINT"; then
         sudo umount -l "$MOUNT_POINT" 2>/dev/null
@@ -44,12 +50,12 @@ cleanup_environment() {
 
     # 3. Wipe Data
     sudo rm -f "$DB_PATH" 2>/dev/null
-    sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" 2>/dev/null
+    sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" "$SYSTEM_DATA_DIR" 2>/dev/null
     # Ensure parent dir exists
     mkdir -p "$(dirname "$DB_PATH")"
-    
+
     # 4. Recreate Dirs
-    mkdir -p "$MOUNT_POINT" "$WATCH_DIR"
+    mkdir -p "$MOUNT_POINT" "$WATCH_DIR" "$SYSTEM_DATA_DIR"
 }
 
 # 1. Build
@@ -82,7 +88,7 @@ for test_file in "${ALL_TESTS[@]}"; do
     
     # B. Launch Daemon (Fresh Instance)
     # We truncate the log file for each test to make debugging easier
-    sudo nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
+    sudo -E nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
     
     # Wait for daemon to stabilize (HollowDrive ready)
     # Nomic might take a moment to download on first run

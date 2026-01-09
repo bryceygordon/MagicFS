@@ -1,4 +1,4 @@
-IOIOIO# MagicFS Roadmap & Charter
+IOIOIOIO# MagicFS Roadmap & Charter
 
 > "The goal is not just to search; it is to maintain the illusion of a physical, infinite drive."
 
@@ -74,6 +74,7 @@ IOIOIO# MagicFS Roadmap & Charter
 **Goal:** "Everything is a Note."
 - [x] **First-Class Inbox:** `/inbox` is now a writable root directory.
 - [x] **Landing Zone:** Files dropped in Inbox are auto-tagged with ID 1 and physically stored.
+- [x] **The Black Hole Inbox:** System-managed ingestion zone with auto-tagging (Tag ID 1).
 - [ ] **PDF Text Extraction:** Integrate `poppler` or `pdf-extract` into `Indexer`.
 - [ ] **Image OCR:** (Long term) Integration for "Scan to Inbox".
 

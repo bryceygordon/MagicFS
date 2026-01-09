@@ -113,6 +113,9 @@ pub struct GlobalState {
 
     /// System state for War Mode management (atomic)
     pub system_state: Arc<AtomicU8>,
+
+    /// Phase 17: System inbox directory path (for automatic Tag ID 1 tagging)
+    pub system_inbox_path: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Result of a semantic search operation
@@ -140,6 +143,7 @@ impl Default for GlobalState {
             search_waiters: Arc::new(Mutex::new(HashMap::new())),
             start_time: SystemTime::now(), // Anchor established on boot
             system_state: Arc::new(AtomicU8::new(SystemState::Booting.as_u8())),
+            system_inbox_path: Arc::new(std::sync::Mutex::new(None)), // Phase 17
         }
     }
 }

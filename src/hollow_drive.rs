@@ -10,7 +10,7 @@ use crate::error::MagicError;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{FileExt, MetadataExt}; // Added MetadataExt for .ino()
 use std::time::{SystemTime, Duration};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use libc;
 use rusqlite::params;
@@ -138,12 +138,16 @@ impl Filesystem for HollowDrive {
 
         // 1. Root Directory
         if parent == INODE_ROOT {
+            tracing::debug!("[lookup] Root lookup for name: '{}'", name_str);
             match name_str {
                 "." | ".." => reply.entry(&ttl, &mk_attr(INODE_ROOT, fuser::FileType::Directory, 0o755), 0),
                 ".magic" => reply.entry(&ttl, &mk_attr(INODE_MAGIC, fuser::FileType::Directory, 0o755), 0),
                 "search" => reply.entry(&ttl, &mk_attr(INODE_SEARCH, fuser::FileType::Directory, 0o555), 0),
                 "mirror" => reply.entry(&ttl, &mk_attr(INODE_MIRROR, fuser::FileType::Directory, 0o755), 0),
-                "inbox" => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755), 0),
+                "inbox" => {
+                    tracing::debug!("[lookup] Returning INODE_INBOX (7) for 'inbox'");
+                    reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755), 0);
+                },
                 "tags" => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o555), 0),
                 _ => reply.error(libc::ENOENT),
             }
@@ -569,6 +573,7 @@ impl Filesystem for HollowDrive {
         ];
 
         if ino == INODE_ROOT {
+            tracing::debug!("[readdir] Listing root directory");
             let mut root_entries = entries.clone();
             root_entries.extend_from_slice(&[
                 (INODE_INBOX, FileType::Directory, "inbox".to_string()),
@@ -578,6 +583,7 @@ impl Filesystem for HollowDrive {
                 (INODE_MAGIC, FileType::Directory, ".magic".to_string()),
             ]);
             for (i, (ino, kind, name)) in root_entries.iter().enumerate().skip(offset as usize) {
+                tracing::debug!("[readdir] Adding entry: inode={}, name={}", ino, name);
                 if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
             }
             reply.ok();
@@ -627,6 +633,7 @@ impl Filesystem for HollowDrive {
         }
 
         if ino == INODE_INBOX {
+             tracing::debug!("[readdir] Listing inbox directory");
              let mut items = entries.clone();
 
              let state_guard = self.state.read().unwrap();
@@ -1063,8 +1070,14 @@ impl Filesystem for HollowDrive {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        // 1. Check Context: Must be a Persistent Tag OR INBOX
-        if !InodeStore::is_persistent(parent) && parent != INODE_INBOX {
+        tracing::debug!("[create] Called: parent_inode={}, name={:?}", parent, name);
+
+        // 1. Check Context: Must be a Persistent Tag OR INODE_INBOX
+        let is_inbox_parent = parent == INODE_INBOX;
+        tracing::debug!("[create] is_inbox_parent={}, parent={}, INODE_INBOX={}", is_inbox_parent, parent, INODE_INBOX);
+
+        if !InodeStore::is_persistent(parent) && !is_inbox_parent {
+            tracing::debug!("[create] Rejected: not persistent and not inbox");
             reply.error(libc::EACCES);
             return;
         }
@@ -1074,27 +1087,60 @@ impl Filesystem for HollowDrive {
             None => { reply.error(libc::EINVAL); return; }
         };
 
-        // 2. Determine Landing Zone
-        // We use the first watched path as the default landing zone.
-        let landing_root = {
-            let state_guard = self.state.read().unwrap();
-            let wp = state_guard.watch_paths.lock().unwrap();
-            if wp.is_empty() {
-                reply.error(libc::ENOSPC); // No storage defined
-                return;
+        // 2. Determine Landing Zone (Phase 17: System-managed inbox)
+        let physical_path = if is_inbox_parent {
+            tracing::debug!("[create] Routing to SYSTEM INBOX for name: {}", name_str);
+            // For inbox, use system inbox directory
+            let system_inbox_dir = {
+                let state_guard = self.state.read().unwrap();
+                let inbox_path_guard = state_guard.system_inbox_path.lock().unwrap();
+                if let Some(path) = inbox_path_guard.as_ref() {
+                    tracing::debug!("[create] System inbox path from state: {}", path);
+                    PathBuf::from(path)
+                } else {
+                    tracing::error!("[create] CRITICAL: System inbox path not set in GlobalState!");
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+            // Ensure directory exists
+            if !system_inbox_dir.exists() {
+                tracing::debug!("[create] Creating system inbox dir: {:?}", system_inbox_dir);
+                if let Err(e) = std::fs::create_dir_all(&system_inbox_dir) {
+                    tracing::error!("[create] Failed to create system inbox dir: {}", e);
+                    reply.error(libc::EIO); return;
+                }
             }
-            wp[0].clone()
+
+            let final_path = system_inbox_dir.join(name_str);
+            tracing::debug!("[create] Final system inbox path: {:?}", final_path);
+            final_path
+        } else {
+            tracing::warn!("[create] Routing to LEGACY _imported (parent={}, INODE_INBOX={})", parent, INODE_INBOX);
+            // For regular tags, use the old _imported logic (for now)
+            // This maintains backward compatibility for tag creation
+            let landing_root = {
+                let state_guard = self.state.read().unwrap();
+                let wp = state_guard.watch_paths.lock().unwrap();
+                if wp.is_empty() {
+                    reply.error(libc::ENOSPC); // No storage defined
+                    return;
+                }
+                wp[0].clone()
+            };
+
+            let import_dir = Path::new(&landing_root).join("_imported");
+            if !import_dir.exists() {
+                if let Err(_) = std::fs::create_dir_all(&import_dir) {
+                    reply.error(libc::EIO); return;
+                }
+            }
+
+            let legacy_path = import_dir.join(name_str);
+            tracing::debug!("[create] Final legacy path: {:?}", legacy_path);
+            legacy_path
         };
-
-        let import_dir = Path::new(&landing_root).join("_imported");
-        if !import_dir.exists() {
-            if let Err(_) = std::fs::create_dir_all(&import_dir) {
-                reply.error(libc::EIO); return;
-            }
-        }
-
-        // 3. Physical Creation
-        let physical_path = import_dir.join(name_str);
         let physical_path_str = physical_path.to_string_lossy().to_string();
 
         let file = match OpenOptions::new()
