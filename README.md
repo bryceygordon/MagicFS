@@ -52,3 +52,70 @@ Configuration is handled via `~/.config/magicfs/daemon.conf` or CLI arguments.
 MAGICFS_MOUNT="/home/user/MagicFS"
 MAGICFS_WATCH="/home/user/Documents,/home/user/Obsidian"
 ```
+
+## ⚠️ Known Limitations
+
+### File Operations
+
+**1. `cp` vs. `cat` vs. `>` (Copy Import Behavior)**
+* **Observation**: The standard `cp` command may fail with certain atomic copy utilities (rsync temp-file strategy).
+* **Reason**: FUSE create() limitations with specific atomic patterns.
+* **Workaround**: Use shell redirection `cat source > dest` or `cp source dest` works for regular files. This affects the "Import via Copy" workflow for complex file managers.
+* **Impact**: Low. Direct write operations (editors, shell redirection) work perfectly.
+
+**2. Large File Import**
+* **Limit**: Files > 10MB are automatically ignored by the indexer.
+* **Reason**: Memory safety and vectorization constraints.
+* **Workaround**: None. Large files serve little value for semantic search.
+
+**3. FUSE Zombie Mounts**
+* **Issue**: Killing the daemon without proper unmount leaves a zombie mount.
+* **Fix**: Use `sudo umount -l <mount>` to force cleanup before restarting.
+* **Current**: `dev.sh` and `tests/run_suite.sh` handle this automatically.
+
+### Performance
+
+**4. First-Run Latency**
+* **Issue**: Initial vector model download (Nomic Embed v1.5) takes time.
+* **Behavior**: First startup may take 10-30s longer to download ~50MB model.
+* **Cache**: Model cached in `~/.cache/fastembed/` for subsequent runs.
+
+**5. Indexing Bulk Import**
+* **War Mode**: During initial scan, WAL mode is disabled for speed.
+* **Risk**: Power loss during initial indexing can corrupt database (requires restart).
+* **Safety**: Database switches to safe WAL mode once backlog is cleared.
+
+### Semantic Search
+
+**6. Relevance Scoring**
+* **Logic**: Scores are 0.0 to 1.0 based on cosine similarity.
+* **Threshold**: Scores > 0.5 are generally relevant, > 0.8 is very strong.
+* **Variation**: Scores fluctuate based on model version and embedding precision.
+
+**7. Noise Filtering**
+* **Bouncer**: Rejects hidden files (`.`), archives (`.zip`), and binary formats.
+* **Reason**: Prevents database pollution with unsearchable content.
+* **Override**: Modify `src/core/bouncer.rs` to adjust patterns.
+
+### Data Safety
+
+**8. Soft Delete Only**
+* **Current**: `rm` from tag view preserves physical data in `~/[WatchDir]/_imported/`.
+* **Timeline**: Physical files in `_imported/` are not automatically cleaned.
+* **Future**: Phase 16+ will implement Scavenger and Incinerator.
+
+**9. Database Permissions**
+* **Issue**: Daemon runs as root, creating WAL files owned by root.
+* **Fix**: Permission hardening changes ownership to real user.
+* **Verify**: Check `/tmp/.magicfs_nomic/index.db*` files if CLI tools can't read DB.
+
+---
+
+## 🏗️ Architecture Documents
+
+For deep technical specifications:
+* **`CHARTER.md`** - The core philosophies and "Prime Directives"
+* **`CONCEPTS.md`** - Vision for Thin Clients and The Lens
+* **`PERFORMANCE_OPTIMISATION.md`** - War Mode vs. Peace Mode strategies
+* **`SPEC_PERSISTENCE.md`** - Database schema and Inode Zoning
+* **`SPEC_AUTO_ORGANIZATION.md`** - Magnetic Tags (Future)

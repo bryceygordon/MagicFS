@@ -1,4 +1,4 @@
-# MagicFS Roadmap & Charter
+IO# MagicFS Roadmap & Charter
 
 > "The goal is not just to search; it is to maintain the illusion of a physical, infinite drive."
 
@@ -57,6 +57,16 @@
 **Goal:** Prepare the DB for concurrent read-access by the GUI Client.
 - [x] **Permission Hardening:** Ensure `index.db`, `.wal`, and `.shm` are readable by the user group (0664), even if Daemon runs as root.
 - [x] **Query Performance:** Add indices on `file_tags(tag_id)` and `tags(parent_tag_id)` for instant UI tree rendering.
+
+---
+
+## ✅ Phase 20: End-to-End Verification (COMPLETE)
+**Goal:** Validate "Illusion of Physicality" via manual user journey testing.
+- [x] **Manual User Journey:** Validated Mirror, Search, Tagging, and Soft Delete workflows.
+- [x] **Stability Check:** Verified War Mode/Peace Mode transitions during live usage.
+- [x] **Semantic Search Validation:** Confirmed vector-based retrieval with high relevance scores.
+- [x] **Safety Guarantees:** Verified Soft Delete preserves physical data.
+- [x] **Bouncer Validation:** Confirmed noise filtering and read-only enforcement.
 
 ---
 
