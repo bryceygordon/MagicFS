@@ -412,16 +412,18 @@ impl<'a> Repository<'a> {
         if war_mode {
             tracing::warn!("[Repository] 🔥 ENTERING WAR MODE (Max Performance)");
             // Maximum throughput: No disk sync, memory journal
-            self.conn.execute("PRAGMA synchronous = OFF", [])?;
-            self.conn.execute("PRAGMA journal_mode = MEMORY", [])?;
+            // Use pragma_update() instead of execute() because PRAGMA statements return the new value
+            self.conn.pragma_update(None, "synchronous", "OFF")?;
+            self.conn.pragma_update(None, "journal_mode", "MEMORY")?;
         } else {
             tracing::info!("[Repository] 🛡️ ENTERING PEACE MODE (Safe)");
             // Safe mode: Normal sync, WAL for concurrency
             // First checkpoint to flush memory journal to disk
+            // wal_checkpoint is a special PRAGMA that performs a checkpoint, execute() is appropriate here
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", [])?;
-            // Then switch to safe settings
-            self.conn.execute("PRAGMA synchronous = NORMAL", [])?;
-            self.conn.execute("PRAGMA journal_mode = WAL", [])?;
+            // Then switch to safe settings using pragma_update()
+            self.conn.pragma_update(None, "synchronous", "NORMAL")?;
+            self.conn.pragma_update(None, "journal_mode", "WAL")?;
         }
         Ok(())
     }
