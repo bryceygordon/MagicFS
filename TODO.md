@@ -72,6 +72,8 @@ IO# MagicFS Roadmap & Charter
 
 ## 📄 Phase 17: Universal Ingestion (Evernote Parity)
 **Goal:** "Everything is a Note."
+- [x] **First-Class Inbox:** `/inbox` is now a writable root directory.
+- [x] **Landing Zone:** Files dropped in Inbox are auto-tagged with ID 1 and physically stored.
 - [ ] **PDF Text Extraction:** Integrate `poppler` or `pdf-extract` into `Indexer`.
 - [ ] **Image OCR:** (Long term) Integration for "Scan to Inbox".
 
@@ -97,3 +99,7 @@ IO# MagicFS Roadmap & Charter
 
 ## ✅ Phase 21: Flattening the Hierarchy (UX Architecture)
 - [x] **First-Class Citizens:** Moved `/inbox` and `/tags` to filesystem root for zero-click access.
+
+## ✅ Phase 22: Stability & Harness Hardening
+- [x] **WAL-Safe Testing:** Converted all Python tests to use `subprocess` for DB reads.
+- [x] **Omnibus Repair:** Fixed permissions, paths, and logic gaps in the new root hierarchy.
