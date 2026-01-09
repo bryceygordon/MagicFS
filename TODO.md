@@ -94,3 +94,6 @@ IO# MagicFS Roadmap & Charter
 ### 3. The Learning Loop
 - [ ] **Recalculator:** Trigger a Centroid update whenever a file is manually moved (`rename`) or confirmed.
 - [ ] **Confirmation Logic:** Update `is_auto=0` on `open()` events in `HollowDrive`.
+
+## ✅ Phase 21: Flattening the Hierarchy (UX Architecture)
+- [x] **First-Class Citizens:** Moved `/inbox` and `/tags` to filesystem root for zero-click access.
