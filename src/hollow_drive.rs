@@ -964,7 +964,47 @@ impl Filesystem for HollowDrive {
             None => { reply.error(libc::EINVAL); return; }
         };
 
-        // Only support renaming within the Tag System
+        // --- NEW: INBOX ATOMIC SAVE SUPPORT ---
+        // Allow renaming files strictly WITHIN the Inbox (e.g. .part -> .txt)
+        if parent == INODE_INBOX && newparent == INODE_INBOX {
+             // 1. Get System Inbox Path from State
+             let inbox_path = {
+                 let state_guard = self.state.read().unwrap();
+                 let lock = state_guard.system_inbox_path.lock().unwrap();
+                 match lock.clone() {
+                     Some(p) => p,
+                     None => {
+                         // Should not happen if Phase 17 initialized correctly
+                         reply.error(libc::ENOENT);
+                         return;
+                     }
+                 }
+             };
+
+             let old_path = std::path::Path::new(&inbox_path).join(name_str);
+             let new_path = std::path::Path::new(&inbox_path).join(newname_str);
+
+             // 2. Perform Physical Rename
+             if let Err(e) = std::fs::rename(&old_path, &new_path) {
+                 let err = match e.kind() {
+                     std::io::ErrorKind::NotFound => libc::ENOENT,
+                     std::io::ErrorKind::PermissionDenied => libc::EACCES,
+                     std::io::ErrorKind::AlreadyExists => libc::EEXIST,
+                     _ => libc::EIO,
+                 };
+                 tracing::error!("[HollowDrive] Inbox rename failed: {}", e);
+                 reply.error(err);
+                 return;
+             }
+
+             // 3. Success (Librarian will handle DB updates via inotify)
+             tracing::info!("[HollowDrive] Atomic rename in Inbox: {} -> {}", name_str, newname_str);
+             reply.ok();
+             return;
+        }
+        // --- END NEW LOGIC ---
+
+        // Only support renaming within the Tag System (Existing Check)
         if !InodeStore::is_persistent(parent) || !InodeStore::is_persistent(newparent) {
             reply.error(libc::EXDEV); // "Cross-device link"
             return;
