@@ -143,22 +143,22 @@ impl Filesystem for HollowDrive {
                 ".magic" => reply.entry(&ttl, &mk_attr(INODE_MAGIC, fuser::FileType::Directory, 0o755), 0),
                 "search" => reply.entry(&ttl, &mk_attr(INODE_SEARCH, fuser::FileType::Directory, 0o555), 0),
                 "mirror" => reply.entry(&ttl, &mk_attr(INODE_MIRROR, fuser::FileType::Directory, 0o755), 0),
+                "inbox" => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o555), 0),
+                "tags" => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o555), 0),
                 _ => reply.error(libc::ENOENT),
             }
             return;
         }
 
         // 2. .magic
-        if parent == INODE_MAGIC { 
+        if parent == INODE_MAGIC {
              match name_str {
                 "." | ".." => reply.entry(&ttl, &mk_attr(INODE_MAGIC, fuser::FileType::Directory, 0o755), 0),
                 "refresh" => {
                     let mut attr = mk_attr(INODE_REFRESH, fuser::FileType::RegularFile, 0o666);
-                    attr.size = 0; 
-                    reply.entry(&ttl, &attr, 0); 
+                    attr.size = 0;
+                    reply.entry(&ttl, &attr, 0);
                 },
-                "tags" => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o555), 0),
-                "inbox" => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o555), 0),
                 _ => reply.error(libc::ENOENT),
             }
             return;
@@ -525,9 +525,11 @@ impl Filesystem for HollowDrive {
         if ino == INODE_ROOT {
             let mut root_entries = entries.clone();
             root_entries.extend_from_slice(&[
-                (INODE_MAGIC, FileType::Directory, ".magic".to_string()),
+                (INODE_INBOX, FileType::Directory, "inbox".to_string()),
+                (INODE_TAGS, FileType::Directory, "tags".to_string()),
                 (INODE_SEARCH, FileType::Directory, "search".to_string()),
                 (INODE_MIRROR, FileType::Directory, "mirror".to_string()),
+                (INODE_MAGIC, FileType::Directory, ".magic".to_string()),
             ]);
             for (i, (ino, kind, name)) in root_entries.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
@@ -540,8 +542,6 @@ impl Filesystem for HollowDrive {
             let mut items = entries.clone();
             items.extend_from_slice(&[
                 (INODE_REFRESH, FileType::RegularFile, "refresh".to_string()),
-                (INODE_TAGS, FileType::Directory, "tags".to_string()),
-                (INODE_INBOX, FileType::Directory, "inbox".to_string()),
             ]);
             for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
