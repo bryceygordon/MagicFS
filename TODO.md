@@ -56,7 +56,7 @@
 ## 🖥️ Phase 16: The Metadata Sidecar (Future Thin Client)
 **Goal:** Prepare the DB for concurrent read-access by the GUI Client.
 - [x] **Permission Hardening:** Ensure `index.db`, `.wal`, and `.shm` are readable by the user group (0664), even if Daemon runs as root.
-- [ ] **Query Performance:** Add indices on `file_tags(tag_id)` and `tags(parent_tag_id)` for instant UI tree rendering.
+- [x] **Query Performance:** Add indices on `file_tags(tag_id)` and `tags(parent_tag_id)` for instant UI tree rendering.
 
 ---
 

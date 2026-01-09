@@ -69,16 +69,32 @@ impl<'a> Repository<'a> {
             CREATE TABLE IF NOT EXISTS file_tags (
                 file_id INTEGER NOT NULL,
                 tag_id INTEGER NOT NULL,
-                
+
                 -- The Multiverse: A file can have a different name in this specific tag view
-                display_name TEXT, 
-                
+                display_name TEXT,
+
                 added_at INTEGER DEFAULT (unixepoch()),
-                
+
                 PRIMARY KEY (file_id, tag_id),
                 FOREIGN KEY (file_id) REFERENCES file_registry(file_id) ON DELETE CASCADE,
                 FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE
             );
+        "#).map_err(MagicError::Database)?;
+
+        // === PHASE 16: Query Performance Indices ===
+        // These indices optimize common operations for the Sidecar GUI
+
+        // Index for fast parent-child lookups in tag hierarchy
+        // Used by: readdir() on /magic/tags to list subdirectories
+        self.conn.execute_batch(r#"
+            CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_tag_id);
+        "#).map_err(MagicError::Database)?;
+
+        // Index for fast file lookup by tag (reverse of primary key)
+        // Used by: readdir() on /magic/tags/[tag] to list files
+        // PK is (file_id, tag_id), but we need fast (tag_id) queries
+        self.conn.execute_batch(r#"
+            CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
         "#).map_err(MagicError::Database)?;
 
         // 5. Default Tags (Inbox, Trash)
