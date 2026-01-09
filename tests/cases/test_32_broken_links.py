@@ -57,13 +57,14 @@ physical_path = os.path.join(test.watch_dir, offline_file)
 if os.path.exists(physical_path):
     os.remove(physical_path)
     print(f"🗑️  Physically deleted: {physical_path}")
+    assert not os.path.exists(physical_path), "File still exists after os.remove!"
 
 # 6. Restart daemon
 print("🚀 Restarting daemon...")
 os.system("sudo pkill -9 -x magicfs 2>/dev/null")
 time.sleep(1)
 os.system("cd /home/bryceg/magicfs && cargo build --quiet")
-os.system(f"cd /home/bryceg/magicfs && sudo nohup ./target/debug/magicfs {test.mount_point} {test.watch_dir} > /tmp/magicfs_debug.log 2>&1 &")
+os.system(f"cd /home/bryceg/magicfs && sudo nohup ./target/debug/magicfs {test.mount_point} {test.watch_dir} > tests/magicfs.log 2>&1 &")
 time.sleep(3)
 
 # 7. Wait for daemon ready and indexing to complete
@@ -99,6 +100,7 @@ physical_path = os.path.join(test.watch_dir, realtime_file)
 if os.path.exists(physical_path):
     os.remove(physical_path)
     print(f"🗑️  Physically deleted (backdoor): {physical_path}")
+    assert not os.path.exists(physical_path), "File still exists after os.remove!"
 
 # 5. Wait for inotify to catch it and Oracle to process
 print("👀 Waiting for real-time detection...")

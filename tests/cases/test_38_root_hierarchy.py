@@ -32,7 +32,6 @@ import os
 import sys
 import subprocess
 import time
-import sqlite3
 
 # Setup paths
 MOUNT_POINT = "/tmp/magicfs-test-mount"  # From run_suite.sh / run_single.sh
@@ -162,17 +161,16 @@ def main():
     # We'll create a file in 'inbox' via the database to ensure FUSE can resolve it
     if os.path.exists(DB_PATH):
         try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
+            # Ensure 'inbox' tag exists using sudo sqlite3
+            subprocess.run(["sudo", "sqlite3", DB_PATH, "INSERT OR IGNORE INTO tags (name) VALUES ('inbox')"],
+                         check=True, capture_output=True)
 
-            # Ensure 'inbox' tag exists
-            cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES ('inbox')")
+            # Get inbox tag ID using sudo sqlite3
+            result = subprocess.run(["sudo", "sqlite3", DB_PATH, "SELECT tag_id FROM tags WHERE name='inbox'"],
+                                  capture_output=True, text=True, check=True)
 
-            # Create a test entry
-            cursor.execute("SELECT tag_id FROM tags WHERE name='inbox'")
-            result = cursor.fetchone()
-            if result:
-                inbox_id = result[0]
+            if result.stdout.strip():
+                inbox_id = result.stdout.strip()
                 log(f"Inbox tag ID: {inbox_id}")
 
                 # Verify we can see the inbox directory (it's a virtual view)
@@ -184,8 +182,6 @@ def main():
                     all_tests_passed = False
             else:
                 log("⚠ Could not verify inbox tag ID", "WARN")
-
-            conn.close()
 
         except Exception as e:
             log(f"Database check failed: {e}", "WARN")

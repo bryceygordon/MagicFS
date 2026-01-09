@@ -3,7 +3,6 @@ from common import MagicTest
 import os
 import subprocess
 import sys
-import sqlite3
 import time
 
 test = MagicTest()
@@ -19,7 +18,7 @@ subprocess.run(["sudo", "sqlite3", test.db_path, """
 # Mount refresh to pick up the new tag
 # 2. Verify empty tag exists in filesystem
 print("[Verify] Checking empty tag exists...")
-empty_path = os.path.join(test.mount_point, ".magic", "tags", "empty")
+empty_path = os.path.join(test.mount_point, "tags", "empty")
 if os.path.exists(empty_path):
     print("✅ Empty tag exists in mount")
 else:
@@ -36,10 +35,9 @@ except Exception as e:
     sys.exit(1)
 
 # 4. Verify tag is gone from DB
-conn = sqlite3.connect(test.db_path)
-cursor = conn.cursor()
-cursor.execute("SELECT COUNT(*) FROM tags WHERE name = 'empty'")
-count = cursor.fetchone()[0]
+cmd = ["sudo", "sqlite3", test.db_path, "SELECT COUNT(*) FROM tags WHERE name = 'empty'"]
+result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+count = int(result.stdout.strip())
 if count == 0:
     print("✅ Tag removed from database")
 else:
@@ -58,7 +56,7 @@ subprocess.run(["sudo", "sqlite3", test.db_path, """
 time.sleep(0.5)
 
 print("[Action] Attempting to remove non-empty tag...")
-nonempty_path = os.path.join(test.mount_point, ".magic", "tags", "withfile")
+nonempty_path = os.path.join(test.mount_point, "tags", "withfile")
 try:
     os.rmdir(nonempty_path)
     print("❌ FAILURE: Should not remove tag containing files")
@@ -80,7 +78,7 @@ subprocess.run(["sudo", "sqlite3", test.db_path, """
 time.sleep(0.5)
 
 print("[Action] Attempting to remove parent with children...")
-parent_path = os.path.join(test.mount_point, ".magic", "tags", "parent")
+parent_path = os.path.join(test.mount_point, "tags", "parent")
 try:
     os.rmdir(parent_path)
     print("❌ FAILURE: Should not remove tag containing children")
@@ -122,13 +120,13 @@ except Exception as e:
     sys.exit(1)
 
 # 9. Verify final state
-cursor.execute("SELECT name FROM tags WHERE name IN ('parent', 'child1', 'child2', 'empty', 'withfile')")
-remaining = cursor.fetchall()
-if len(remaining) == 1 and remaining[0][0] == 'withfile':
+cmd = ["sudo", "sqlite3", test.db_path, "SELECT name FROM tags WHERE name IN ('parent', 'child1', 'child2', 'empty', 'withfile')"]
+result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+if len(lines) == 1 and lines[0] == 'withfile':
     print("✅ Correct tags remain (only 'withfile')")
 else:
-    print(f"❌ FAILURE: Unexpected remaining tags: {remaining}")
+    print(f"❌ FAILURE: Unexpected remaining tags: {lines}")
     sys.exit(1)
 
-conn.close()
 print("✅ RMDIR TEST PASSED")

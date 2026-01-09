@@ -2,7 +2,6 @@ from common import MagicTest
 import time
 import os
 import subprocess
-import sqlite3
 import shutil
 
 test = MagicTest()
@@ -28,26 +27,15 @@ for i in range(FILE_COUNT):
 
 # 2. Wait for indexing
 print("[Phase 1] Waiting for DB to catch up...")
-def get_db_count():
-    try:
-        conn = sqlite3.connect(test.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT count(*) FROM file_registry")
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else 0
-    except:
-        return 0
-
 # Wait loop
 for _ in range(60):
-    count = get_db_count()
+    count = test.get_db_count()
     if count >= FILE_COUNT:
         break
     time.sleep(0.5)
 
 end_time = time.time()
-final_count = get_db_count()
+final_count = test.get_db_count()
 print(f"✅ Indexed {final_count}/{FILE_COUNT} files in {end_time - start_time:.2f}s")
 
 # ---------------------------------------------------------
@@ -61,7 +49,7 @@ for i in range(10):
         os.remove(path)
 
 time.sleep(3) # Give Librarian time to notice deletion
-current_count = get_db_count()
+current_count = test.get_db_count()
 print(f"DB Count after deletion: {current_count}")
 
 # ---------------------------------------------------------
@@ -110,7 +98,7 @@ with open(log_file, "r") as f:
             re_indexed_count += 1
 
 print(f"Files re-indexed on startup: {re_indexed_count}")
-final_zombie_count = get_db_count()
+final_zombie_count = test.get_db_count()
 print(f"Final DB Count: {final_zombie_count}")
 
 # ---------------------------------------------------------

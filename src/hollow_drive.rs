@@ -143,7 +143,7 @@ impl Filesystem for HollowDrive {
                 ".magic" => reply.entry(&ttl, &mk_attr(INODE_MAGIC, fuser::FileType::Directory, 0o755), 0),
                 "search" => reply.entry(&ttl, &mk_attr(INODE_SEARCH, fuser::FileType::Directory, 0o555), 0),
                 "mirror" => reply.entry(&ttl, &mk_attr(INODE_MIRROR, fuser::FileType::Directory, 0o755), 0),
-                "inbox" => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o555), 0),
+                "inbox" => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755), 0),
                 "tags" => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o555), 0),
                 _ => reply.error(libc::ENOENT),
             }
@@ -219,8 +219,54 @@ impl Filesystem for HollowDrive {
         // 5. Inbox Root
         if parent == INODE_INBOX {
              match name_str {
-                "." | ".." => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o555), 0),
-                _ => reply.error(libc::ENOENT),
+                "." | ".." => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755), 0),
+                _ => {
+                    // Resolve files from Tag ID 1 (Inbox)
+                    let state_guard = self.state.read().unwrap();
+                    let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+                    if let Some(conn) = conn_lock.as_mut() {
+                        let repo = Repository::new(conn);
+                        match repo.get_tag_id_by_name(name_str, Some(1)) {
+                            Ok(Some(tag_id)) => {
+                                // Child tag found
+                                let child_inode = InodeStore::db_id_to_inode(tag_id);
+                                reply.entry(&ttl, &mk_attr(child_inode, fuser::FileType::Directory, 0o755), 0);
+                                return;
+                            }
+                            _ => {}
+                        }
+
+                        // Try file lookup in tag_id=1
+                        let sql = "
+                            SELECT f.inode, f.size, f.mtime, f.is_dir
+                            FROM file_tags ft
+                            JOIN file_registry f ON ft.file_id = f.file_id
+                            WHERE ft.tag_id = 1 AND ft.display_name = ?1
+                        ";
+
+                        if let Ok(mut stmt) = conn.prepare(sql) {
+                            if let Ok(row) = stmt.query_row(params![name_str], |row| {
+                                Ok((
+                                    row.get::<_, u64>(0)?,
+                                    row.get::<_, u64>(1)?,
+                                    row.get::<_, u64>(2)?,
+                                    row.get::<_, i32>(3)?
+                                ))
+                            }) {
+                                let kind = if row.3 != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
+                                let perm = if row.3 != 0 { 0o755 } else { 0o644 };
+                                let mut attr = mk_attr(row.0, kind, perm);
+                                attr.size = row.1;
+                                attr.blocks = (row.1 + 511)/512;
+                                attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(row.2);
+                                reply.entry(&ttl, &attr, 0);
+                                return;
+                            }
+                        }
+                    }
+                    reply.error(libc::ENOENT);
+                }
              }
              return;
         }
@@ -424,7 +470,7 @@ impl Filesystem for HollowDrive {
             INODE_REFRESH => { attr.kind = fuser::FileType::RegularFile; attr.size = 0; attr.perm = 0o666; attr.nlink = 1; }, 
             INODE_MIRROR => {}, 
             INODE_TAGS => { attr.perm = 0o555; },
-            INODE_INBOX => { attr.perm = 0o555; },
+            INODE_INBOX => { attr.perm = 0o755; },
             _ => {
                 if InodeStore::is_persistent(ino) {
                     // Tag View - need write permission for rmdir to work
@@ -581,8 +627,70 @@ impl Filesystem for HollowDrive {
         }
 
         if ino == INODE_INBOX {
-             // For now, Inbox is just empty
-             for (i, (ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
+             let mut items = entries.clone();
+
+             let state_guard = self.state.read().unwrap();
+             let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+             if let Some(conn) = conn_lock.as_mut() {
+                 // First: Add child tags of Inbox (tag_id=1)
+                 let child_tag_sql = "SELECT tag_id, name FROM tags WHERE parent_tag_id = 1";
+                 if let Ok(mut stmt) = conn.prepare(child_tag_sql) {
+                     if let Ok(rows) = stmt.query_map([], |row| {
+                         Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+                     }) {
+                         for row in rows {
+                             if let Ok((child_tag_id, name)) = row {
+                                 let child_inode = InodeStore::db_id_to_inode(child_tag_id);
+                                 items.push((child_inode, FileType::Directory, name));
+                             }
+                         }
+                     } else {
+                         tracing::error!("DB Error querying inbox child tags");
+                     }
+                 }
+
+                 // Second: Add files from inbox (tag_id=1)
+                 let sql = "
+                    SELECT f.inode, f.is_dir, ft.display_name
+                    FROM file_tags ft
+                    JOIN file_registry f ON ft.file_id = f.file_id
+                    WHERE ft.tag_id = 1
+                    ORDER BY f.file_id ASC
+                 ";
+                 if let Ok(mut stmt) = conn.prepare(sql) {
+                     if let Ok(rows) = stmt.query_map([], |row| {
+                         Ok((
+                             row.get::<_, u64>(0)?,
+                             row.get::<_, i32>(1)?,
+                             row.get::<_, String>(2)?
+                         ))
+                     }) {
+                         // COLLISION RESOLUTION: Count Names
+                         let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+                         for row in rows {
+                             if let Ok((inode, is_dir, name)) = row {
+                                 let count = name_counts.entry(name.clone()).or_insert(0);
+                                 *count += 1;
+
+                                 let final_name = if *count > 1 {
+                                     format!("{} ({})", name, count)
+                                 } else {
+                                     name
+                                 };
+
+                                 let kind = if is_dir != 0 { FileType::Directory } else { FileType::RegularFile };
+                                 items.push((inode, kind, final_name));
+                             }
+                         }
+                     } else {
+                         tracing::error!("DB Error querying inbox file tags");
+                     }
+                 }
+             }
+
+             for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
             }
             reply.ok();
@@ -955,8 +1063,8 @@ impl Filesystem for HollowDrive {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        // 1. Check Context: Must be a Persistent Tag
-        if !InodeStore::is_persistent(parent) {
+        // 1. Check Context: Must be a Persistent Tag OR INBOX
+        if !InodeStore::is_persistent(parent) && parent != INODE_INBOX {
             reply.error(libc::EACCES);
             return;
         }
@@ -1018,7 +1126,11 @@ impl Filesystem for HollowDrive {
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
 
         // 5. Database Registration
-        let tag_id = InodeStore::inode_to_db_id(parent);
+        let tag_id = if parent == INODE_INBOX {
+            1u64 // Inbox is always Tag 1
+        } else {
+            InodeStore::inode_to_db_id(parent)
+        };
         
         let state_guard = self.state.read().unwrap();
         let mut conn_lock = state_guard.db_connection.lock().unwrap();

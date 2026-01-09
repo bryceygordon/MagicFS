@@ -22,16 +22,15 @@ except subprocess.CalledProcessError as e:
 time.sleep(1) 
 
 # 3. Verify Directory Structure
-print("[Check] Verifying /magic/tags existence...")
-# Note: Inode 2 is .magic (defined in HollowDrive)
-tags_path = os.path.join(test.mount_point, ".magic", "tags")
+print("[Check] Verifying /tags existence...")
+tags_path = os.path.join(test.mount_point, "tags")
 
 if not os.path.exists(tags_path):
     print(f"❌ FAILURE: {tags_path} does not exist.")
     # We exit here because if the root doesn't exist, we can't check children
     sys.exit(1)
 
-print("[Check] Verifying /magic/tags/finance existence...")
+print("[Check] Verifying /tags/finance existence...")
 
 # We list the directory to see if 'finance' appears
 try:
@@ -46,8 +45,8 @@ except OSError as e:
     sys.exit(1)
 
 # 4. Verify Inbox
-print("[Check] Verifying /magic/inbox existence...")
-inbox_path = os.path.join(test.mount_point, ".magic", "inbox")
+print("[Check] Verifying /inbox existence...")
+inbox_path = os.path.join(test.mount_point, "inbox")
 if not os.path.exists(inbox_path):
     print(f"❌ FAILURE: {inbox_path} does not exist.")
     sys.exit(1)

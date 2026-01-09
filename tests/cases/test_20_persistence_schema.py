@@ -1,5 +1,5 @@
 from common import MagicTest
-import sqlite3
+import subprocess
 import sys
 import os
 import time
@@ -7,10 +7,9 @@ import time
 test = MagicTest()
 print("--- TEST 20: Persistence Schema & Inode Zoning ---")
 
-# 1. Connect to the Database
-print(f"[Setup] Connecting to DB at {test.db_path}...")
+# 1. Wait for Database to exist
+print(f"[Setup] Waiting for DB at {test.db_path}...")
 
-# Hardening: Wait loop in case Daemon is still initializing DB
 timeout = 5
 start = time.time()
 while not os.path.exists(test.db_path):
@@ -19,36 +18,40 @@ while not os.path.exists(test.db_path):
         sys.exit(1)
     time.sleep(0.5)
 
-conn = sqlite3.connect(test.db_path)
-cursor = conn.cursor()
-
-# 2. Check for Table Existence
+# 2. Check for Table Existence using sudo sqlite3
 expected_tables = ["file_registry", "vec_index", "tags", "file_tags"]
 missing_tables = []
 
 print("[Check] Verifying schema tables...")
 for table in expected_tables:
-    cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
-    if not cursor.fetchone():
+    # Use sudo sqlite3 to avoid WAL permission issues
+    cmd = ["sudo", "sqlite3", test.db_path, f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    if not result.stdout.strip():
         missing_tables.append(table)
 
 if missing_tables:
     print(f"❌ FAILURE: Missing required tables: {missing_tables}")
     print("   Did the Daemon fail to run the new Repository::initialize code?")
-    conn.close()
     sys.exit(1)
 else:
     print("✅ All tables present.")
 
 # 3. Check Schema Definitions (Foreign Keys)
 print("[Check] Verifying relationships...")
-# Check file_tags structure
-cursor.execute("PRAGMA table_info(file_tags)")
-columns = {row[1] for row in cursor.fetchall()}
+# Check file_tags structure using sudo sqlite3
+cmd = ["sudo", "sqlite3", test.db_path, "PRAGMA table_info(file_tags)"]
+result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+columns = set()
+for line in result.stdout.strip().split('\n'):
+    if line:
+        parts = line.split('|')
+        if len(parts) > 1:
+            columns.add(parts[1])
+
 required_cols = {"file_id", "tag_id", "display_name"}
 if not required_cols.issubset(columns):
     print(f"❌ FAILURE: file_tags missing columns. Found: {columns}")
-    conn.close()
     sys.exit(1)
 
 # 4. Inode Zoning Logic Verification (Python Implementation Check)
@@ -62,4 +65,3 @@ if HIGH_BIT != 9223372036854775808:
     sys.exit(1)
 
 print("✅ Schema & Logic assumptions verified.")
-conn.close()

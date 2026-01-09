@@ -32,8 +32,8 @@ VALUES ({file_id}, (SELECT tag_id FROM tags WHERE name='inbox'), '{filename}');
 subprocess.run(["sudo", "sqlite3", test.db_path, setup_sql], check=True)
 
 # 4. Verify Initial State
-inbox_path = os.path.join(test.mount_point, ".magic", "tags", "inbox", filename)
-finance_path = os.path.join(test.mount_point, ".magic", "tags", "finance", filename)
+inbox_path = os.path.join(test.mount_point, "tags", "inbox", filename)
+finance_path = os.path.join(test.mount_point, "tags", "finance", filename)
 
 if not os.path.exists(inbox_path):
     print("❌ FAILURE: File not found in Inbox before move.")

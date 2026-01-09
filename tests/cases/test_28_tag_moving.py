@@ -21,9 +21,9 @@ subprocess.run(["sudo", "sqlite3", test.db_path, """
 time.sleep(0.5)
 
 # 2. Test moving tag to new parent (work -> finance)
-print("[Action] mv /magic/tags/work/projects /magic/tags/finance/")
-src_path = os.path.join(test.mount_point, ".magic", "tags", "work", "projects")
-dst_path = os.path.join(test.mount_point, ".magic", "tags", "finance", "projects")
+print("[Action] mv /tags/work/projects /tags/finance/")
+src_path = os.path.join(test.mount_point, "tags", "work", "projects")
+dst_path = os.path.join(test.mount_point, "tags", "finance", "projects")
 
 try:
     os.rename(src_path, dst_path)
@@ -49,8 +49,8 @@ else:
     sys.exit(1)
 
 # 4. Test renaming tag within same parent
-print("[Action] mv /magic/tags/finance/projects /magic/tags/finance/fin_proj")
-new_path = os.path.join(test.mount_point, ".magic", "tags", "finance", "fin_proj")
+print("[Action] mv /tags/finance/projects /tags/finance/fin_proj")
+new_path = os.path.join(test.mount_point, "tags", "finance", "fin_proj")
 try:
     os.rename(dst_path, new_path)
     print("✅ Renamed 'projects' to 'fin_proj' within same parent")
@@ -78,14 +78,14 @@ subprocess.run(["sudo", "sqlite3", test.db_path, """
 time.sleep(0.5)
 
 print("[Action] Attempting to create circular dependency (c -> a)...")
-src = os.path.join(test.mount_point, ".magic", "tags", "a", "c")  # This doesn't exist yet
-dst = os.path.join(test.mount_point, ".magic", "tags", "c")      # This exists
+src = os.path.join(test.mount_point, "tags", "a", "c")  # This doesn't exist yet
+dst = os.path.join(test.mount_point, "tags", "c")      # This exists
 
 try:
     # Try to move 'a' into 'c' which is its own descendant
     os.rename(
-        os.path.join(test.mount_point, ".magic", "tags", "a"),
-        os.path.join(test.mount_point, ".magic", "tags", "c", "a")
+        os.path.join(test.mount_point, "tags", "a"),
+        os.path.join(test.mount_point, "tags", "c", "a")
     )
     print("❌ FAILURE: Should prevent circular dependency")
     sys.exit(1)
@@ -165,7 +165,7 @@ except subprocess.CalledProcessError:
 time.sleep(0.5)
 
 print("[Action] Verifying file exists in directory...")
-file_dir = os.path.join(test.mount_point, ".magic", "tags", "finance", "fin_proj")
+file_dir = os.path.join(test.mount_point, "tags", "finance", "fin_proj")
 try:
     listing = os.listdir(file_dir)
     print(f"  Directory listing: {listing}")
@@ -187,8 +187,8 @@ except Exception as e:
     sys.exit(1)
 
 print("[Action] mv file between tags...")
-file_src = os.path.join(test.mount_point, ".magic", "tags", "finance", "fin_proj", "doc.txt")
-file_dst = os.path.join(test.mount_point, ".magic", "tags", "finance", "moved_doc.txt")
+file_src = os.path.join(test.mount_point, "tags", "finance", "fin_proj", "doc.txt")
+file_dst = os.path.join(test.mount_point, "tags", "finance", "moved_doc.txt")
 
 try:
     os.rename(file_src, file_dst)

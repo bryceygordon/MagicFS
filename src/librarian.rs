@@ -306,7 +306,19 @@ impl Librarian {
                         }
                     };
 
-                    // Step 2: Delete physical file from disk
+                    // Step 2: Check if file actually exists before attempting deletion
+                    // This prevents race conditions where a file might have been restored
+                    if !std::path::Path::new(&abs_path).exists() {
+                        tracing::debug!("[Incinerator] File no longer exists, skipping: {}", abs_path);
+                        // Clean up the database entry anyway since the physical file is gone
+                        let repo = crate::storage::Repository::new(conn);
+                        if let Err(e) = repo.delete_file_by_id(file_id) {
+                            tracing::error!("[Incinerator] Failed to delete file_id={} from registry: {}", file_id, e);
+                        }
+                        continue;
+                    }
+
+                    // Step 3: Delete physical file from disk
                     match std::fs::remove_file(&abs_path) {
                         Ok(()) => {
                             tracing::debug!("[Incinerator] Deleted physical file: {}", abs_path);
@@ -320,7 +332,7 @@ impl Librarian {
                         }
                     }
 
-                    // Step 3: Clean up database entries (registry + tags via cascade)
+                    // Step 4: Clean up database entries (registry + tags via cascade)
                     let repo = crate::storage::Repository::new(conn);
                     if let Err(e) = repo.delete_file_by_id(file_id) {
                         tracing::error!("[Incinerator] Failed to delete file_id={} from registry: {}", file_id, e);

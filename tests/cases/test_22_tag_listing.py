@@ -4,7 +4,6 @@ import os
 import subprocess
 import time
 import sys
-import sqlite3
 
 test = MagicTest()
 print("--- TEST 22: Tag View Listing & Content Resolution ---")
@@ -18,18 +17,14 @@ test.create_file(filename, content)
 # 2. Wait for Indexer to pick it up (so we get a valid file_id)
 test.wait_for_indexing(filename)
 
-# 3. Retrieve metadata via Python (Read-only is usually fine, but safer to query cleanly)
-# We accept that we can read if the permissions allow, otherwise we'd need sudo for this too.
-# Usually, reading is fine if the file is 644.
-try:
-    conn = sqlite3.connect(test.db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT file_id, inode FROM file_registry WHERE abs_path = ?", (real_path,))
-    row = cursor.fetchone()
-    conn.close()
-except Exception as e:
-    print(f"❌ FAILURE: Could not read DB: {e}")
-    sys.exit(1)
+# 3. Retrieve metadata via sudo sqlite3 (to avoid WAL permission issues)
+cmd = ["sudo", "sqlite3", test.db_path, f"SELECT file_id, inode FROM file_registry WHERE abs_path = '{real_path}'"]
+result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+if result.stdout.strip():
+    parts = result.stdout.strip().split('|')
+    row = (int(parts[0]), int(parts[1])) if len(parts) >= 2 else None
+else:
+    row = None
 
 if not row:
     print("❌ FAILURE: File not found in registry after indexing.")
@@ -56,7 +51,7 @@ except subprocess.CalledProcessError as e:
     sys.exit(1)
 
 # 5. Verify Listing (readdir)
-tag_view_path = os.path.join(test.mount_point, ".magic", "tags", "finance")
+tag_view_path = os.path.join(test.mount_point, "tags", "finance")
 print(f"[Action] Listing {tag_view_path}...")
 
 try:

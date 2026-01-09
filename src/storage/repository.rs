@@ -98,8 +98,16 @@ impl<'a> Repository<'a> {
         "#).map_err(MagicError::Database)?;
 
         // 5. Default Tags (Inbox, Trash)
-        // We reserve low IDs for system tags if needed, or handle via name.
-        // For now, ensure standard structure exists? No, do lazily in logic.
+        // Ensure system tags exist for consistent behavior
+        self.conn.execute_batch(r#"
+            INSERT OR IGNORE INTO tags (tag_id, name, color, icon)
+            VALUES (1, 'inbox', '#3366cc', '📥');
+        "#).map_err(MagicError::Database)?;
+
+        self.conn.execute_batch(r#"
+            INSERT OR IGNORE INTO tags (name, color, icon)
+            VALUES ('trash', '#cc3366', '🗑️');
+        "#).map_err(MagicError::Database)?;
 
         Ok(())
     }

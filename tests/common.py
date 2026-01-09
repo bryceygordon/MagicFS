@@ -3,6 +3,7 @@ import os
 import time
 import sys
 import shutil
+import subprocess
 
 class MagicTest:
     def __init__(self):
@@ -14,8 +15,8 @@ class MagicTest:
         self.mount_point = sys.argv[2]
         self.watch_dir = sys.argv[3]
         
-        # NEW: Read log location from Env, default to tmp
-        self.log_file = os.environ.get("MAGICFS_LOG_FILE", "/tmp/magicfs_debug.log")
+        # NEW: Read log location from Env, default to tests/magicfs.log
+        self.log_file = os.environ.get("MAGICFS_LOG_FILE", "tests/magicfs.log")
 
     def dump_logs(self, lines=100):
         """Reads the log file directly and dumps it to stdout."""
@@ -61,14 +62,19 @@ class MagicTest:
         time.sleep(0.5)
 
     def get_db_count(self):
+        """Robust DB count using sudo sqlite3 to handle daemon WAL locks."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT count(*) FROM file_registry")
-            result = cursor.fetchone()
-            conn.close()
-            return result[0] if result else 0
-        except:
+            result = subprocess.run(
+                ["sudo", "sqlite3", self.db_path, "SELECT count(*) FROM file_registry;"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return int(result.stdout.strip())
+            else:
+                print(f"[WARN] get_db_count failed: {result.stderr}")
+                return 0
+        except Exception as e:
+            print(f"[WARN] get_db_count exception: {e}")
             return 0
 
     def wait_for_stable_db(self, stability_duration=3, max_wait=120):

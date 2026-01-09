@@ -49,7 +49,7 @@ INSERT INTO file_tags (file_id, tag_id, display_name) VALUES ({id_b}, (SELECT ta
 subprocess.run(["sudo", "sqlite3", test.db_path, setup_sql], check=True)
 
 # 5. List the Tag View
-view_path = os.path.join(test.mount_point, ".magic", "tags", "work")
+view_path = os.path.join(test.mount_point, "tags", "work")
 print(f"[Action] Listing {view_path}...")
 
 try:

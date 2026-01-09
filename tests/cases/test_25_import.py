@@ -18,7 +18,7 @@ with open(source_path, "w") as f:
 subprocess.run(["sudo", "sqlite3", test.db_path, "INSERT INTO tags (name) VALUES ('projects');"], check=True)
 
 # 3. Action: Copy file into the Tag View
-dest_path = os.path.join(test.mount_point, ".magic", "tags", "projects", "imported_doc.txt")
+dest_path = os.path.join(test.mount_point, "tags", "projects", "imported_doc.txt")
 print(f"[Action] Copying {source_path} -> {dest_path}")
 
 try:
