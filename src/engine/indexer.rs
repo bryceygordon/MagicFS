@@ -109,7 +109,7 @@ impl Indexer {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-            let mut repo = Repository::new(conn);
+            let repo = Repository::new(conn);
 
             // Check if file is in system inbox and auto-link to Tag ID 1
             let is_in_inbox = {
@@ -169,28 +169,68 @@ impl Indexer {
     async fn extract_with_retry(path: &str) -> Result<String> {
         let max_retries = 20;
         let mut last_error = None;
+        let mut busy_count = 0;
 
         for attempt in 1..=max_retries {
             let path_owned = path.to_string();
             let path_obj = std::path::Path::new(path);
 
-            // --- NEW CHECK: ABORT IF VANISHED ---
+            // --- PHASE 25: POLITE FILE HANDLING ---
+
+            // 1. ABORT IF VANISHED
             if !path_obj.exists() {
                 tracing::debug!("[Indexer] File vanished during processing (transient?): {}", path);
                 return Ok(String::new()); // Treat as empty, do not error
             }
-            // ------------------------------------
 
-            // PHASE 24 FIX: Zero-Byte Citizenship
-            // Remove the sleep/retry loop for 0-byte files. Treat them as valid final state.
-            if let Ok(m) = std::fs::metadata(path) {
-                if m.len() == 0 {
-                    // ZERO-BYTE FILES ARE CITIZENS TOO!
+            // 2. CHECK IF FILE IS ACTIVELY BEING WRITTEN (PHASE 25 POLITENESS)
+            // Use lsof-style check: try to open exclusively with O_EXCL, or check file size stability
+            if let Ok(metadata) = std::fs::metadata(path) {
+                let file_size = metadata.len();
+
+                // Wait a moment and check if size changed (active write detection)
+                if attempt > 1 && busy_count < 3 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if let Ok(new_metadata) = std::fs::metadata(path) {
+                        if new_metadata.len() != file_size {
+                            // File size is changing = actively being written
+                            busy_count += 1;
+                            tracing::debug!("[Indexer] File {} is actively being written (size changed), yielding... (busy count: {})", path, busy_count);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    }
+                }
+
+                // 3. ZERO-BYTE FILES ARE CITIZENS TOO
+                if file_size == 0 {
                     tracing::debug!("[Indexer] File {} is 0 bytes - treating as valid empty content", path);
                     return Ok(String::new());
                 }
+
+                // 4. TRY EXCLUSIVE OPEN CHECK (Politely ask if file is available)
+                // This is more polite than just trying to read and getting permission denied
+                match std::fs::OpenOptions::new().read(true).open(path) {
+                    Ok(_file) => {
+                        // File is readable, proceed with extraction
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                        if attempt < max_retries {
+                            tracing::info!("[Indexer] File {} is busy/locked, yielding... (attempt {}/{})", path, attempt, max_retries);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        } else {
+                            return Err(MagicError::Io(e));
+                        }
+                    }
+                    Err(e) => {
+                        last_error = Some(MagicError::Io(e));
+                        continue;
+                    }
+                }
             }
 
+            // 5. PERFORM ACTUAL EXTRACTION
             let result = tokio::task::spawn_blocking(move || {
                 crate::storage::extract_text_from_file(std::path::Path::new(&path_owned))
             }).await.map_err(|_| MagicError::Other(anyhow::anyhow!("Task panic")))?;
@@ -199,7 +239,7 @@ impl Indexer {
                 Ok(content) => return Ok(content),
                 Err(MagicError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
                     if attempt < max_retries {
-                        tracing::warn!("[Indexer] Locked/PermissionDenied for {} (attempt {}/{}), waiting...", path, attempt, max_retries);
+                        tracing::warn!("[Indexer] PermissionDenied during extraction for {} (attempt {}/{}), waiting...", path, attempt, max_retries);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     } else {
@@ -208,7 +248,8 @@ impl Indexer {
                 }
                 Err(e) => {
                     last_error = Some(e);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Shorter sleep for other errors to retry faster
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
         }

@@ -225,50 +225,94 @@ impl Filesystem for HollowDrive {
              match name_str {
                 "." | ".." => reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755), 0),
                 _ => {
-                    // Resolve files from Tag ID 1 (Inbox)
                     let state_guard = self.state.read().unwrap();
-                    let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
-                    if let Some(conn) = conn_lock.as_mut() {
-                        let repo = Repository::new(conn);
-                        match repo.get_tag_id_by_name(name_str, Some(1)) {
-                            Ok(Some(tag_id)) => {
+                    // PHASE 25: First, check if it's a child tag (still need DB for tags)
+                    {
+                        let mut conn_lock = state_guard.db_connection.lock().unwrap();
+                        if let Some(conn) = conn_lock.as_mut() {
+                            let repo = Repository::new(conn);
+                            if let Ok(Some(tag_id)) = repo.get_tag_id_by_name(name_str, Some(1)) {
                                 // Child tag found
                                 let child_inode = InodeStore::db_id_to_inode(tag_id);
                                 reply.entry(&ttl, &mk_attr(child_inode, fuser::FileType::Directory, 0o755), 0);
                                 return;
                             }
-                            _ => {}
                         }
+                    }
 
-                        // Try file lookup in tag_id=1
-                        let sql = "
-                            SELECT f.inode, f.size, f.mtime, f.is_dir
-                            FROM file_tags ft
-                            JOIN file_registry f ON ft.file_id = f.file_id
-                            WHERE ft.tag_id = 1 AND ft.display_name = ?1
-                        ";
+                    // PHASE 25: Physical file lookup using filesystem
+                    // Get system inbox path (use as_ref() to avoid move)
+                    let inbox_path_opt = {
+                        let lock = state_guard.system_inbox_path.lock().unwrap();
+                        lock.clone()
+                    };
 
-                        if let Ok(mut stmt) = conn.prepare(sql) {
-                            if let Ok(row) = stmt.query_row(params![name_str], |row| {
-                                Ok((
-                                    row.get::<_, u64>(0)?,
-                                    row.get::<_, u64>(1)?,
-                                    row.get::<_, u64>(2)?,
-                                    row.get::<_, i32>(3)?
-                                ))
-                            }) {
-                                let kind = if row.3 != 0 { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
-                                let perm = if row.3 != 0 { 0o755 } else { 0o644 };
-                                let mut attr = mk_attr(row.0, kind, perm);
-                                attr.size = row.1;
-                                attr.blocks = (row.1 + 511)/512;
-                                attr.mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(row.2);
-                                reply.entry(&ttl, &attr, 0);
-                                return;
+                    // Use a reference to avoid moving inbox_path_opt
+                    if let Some(ref inbox_path) = inbox_path_opt {
+                        let physical_path = std::path::Path::new(inbox_path).join(name_str);
+
+                        // Check if file exists physically
+                        if let Ok(metadata) = std::fs::metadata(&physical_path) {
+                            let abs_path = physical_path.to_string_lossy().to_string();
+                            let inode = state_guard.inode_store.hash_to_inode(&abs_path);
+
+                            // CRITICAL: Register in mirror cache for future read/write operations
+                            state_guard.inode_store.put_mirror_path(inode, abs_path.clone());
+
+                            let kind = if metadata.is_dir() { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
+                            let perm = if metadata.is_dir() { 0o755 } else { 0o644 };
+                            let mut attr = mk_attr(inode, kind, perm);
+                            attr.size = metadata.len();
+                            attr.blocks = (metadata.len() + 511)/512;
+                            attr.mtime = metadata.modified().unwrap_or(std::time::SystemTime::now());
+                            reply.entry(&ttl, &attr, 0);
+                            return;
+                        }
+                    }
+
+                    // PHASE 25: Fallback to virtual name parsing for "(N)" duplicates
+                    if let Some((base_name, index)) = Self::parse_virtual_name(name_str) {
+                        // Check for physical files with collision pattern
+                        if let Some(ref inbox_path) = inbox_path_opt {
+                            let mut candidates = Vec::new();
+
+                            // Scan for files starting with base_name
+                            if let Ok(dir_entries) = std::fs::read_dir(inbox_path) {
+                                for entry in dir_entries.flatten() {
+                                    if let Ok(file_name) = entry.file_name().into_string() {
+                                        if file_name == base_name || file_name.starts_with(&format!("{} (", base_name)) {
+                                            let path = entry.path();
+                                            candidates.push((file_name, path));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Sort to ensure deterministic ordering
+                            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+                            if let Some((_, path)) = candidates.get(index) {
+                                if let Ok(metadata) = std::fs::metadata(path) {
+                                    let abs_path = path.to_string_lossy().to_string();
+                                    let inode = state_guard.inode_store.hash_to_inode(&abs_path);
+
+                                    // CRITICAL: Register in mirror cache
+                                    state_guard.inode_store.put_mirror_path(inode, abs_path.clone());
+
+                                    let kind = if metadata.is_dir() { fuser::FileType::Directory } else { fuser::FileType::RegularFile };
+                                    let perm = if metadata.is_dir() { 0o755 } else { 0o644 };
+                                    let mut attr = mk_attr(inode, kind, perm);
+                                    attr.size = metadata.len();
+                                    attr.blocks = (metadata.len() + 511)/512;
+                                    attr.mtime = metadata.modified().unwrap_or(std::time::SystemTime::now());
+                                    reply.entry(&ttl, &attr, 0);
+                                    return;
+                                }
                             }
                         }
                     }
+
                     reply.error(libc::ENOENT);
                 }
              }
@@ -607,7 +651,7 @@ impl Filesystem for HollowDrive {
             // DB Query for top-level tags
             let state_guard = self.state.read().unwrap();
             let mut conn_lock = state_guard.db_connection.lock().unwrap();
-            
+
             if let Some(conn) = conn_lock.as_mut() {
                 // Ignore error if table not ready, just empty list
                 if let Ok(mut stmt) = conn.prepare("SELECT tag_id, name FROM tags WHERE parent_tag_id IS NULL") {
@@ -633,68 +677,77 @@ impl Filesystem for HollowDrive {
         }
 
         if ino == INODE_INBOX {
-             tracing::debug!("[readdir] Listing inbox directory");
+             tracing::info!("[readdir] INODE_INBOX: Listing physical inbox directory (PHASE 25)");
              let mut items = entries.clone();
 
+             // PHASE 25: Get system inbox path and use std::fs::read_dir
              let state_guard = self.state.read().unwrap();
-             let mut conn_lock = state_guard.db_connection.lock().unwrap();
+             let inbox_path_opt = {
+                 let lock = state_guard.system_inbox_path.lock().unwrap();
+                 lock.clone()
+             };
 
-             if let Some(conn) = conn_lock.as_mut() {
-                 // First: Add child tags of Inbox (tag_id=1)
-                 let child_tag_sql = "SELECT tag_id, name FROM tags WHERE parent_tag_id = 1";
-                 if let Ok(mut stmt) = conn.prepare(child_tag_sql) {
-                     if let Ok(rows) = stmt.query_map([], |row| {
-                         Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
-                     }) {
-                         for row in rows {
-                             if let Ok((child_tag_id, name)) = row {
-                                 let child_inode = InodeStore::db_id_to_inode(child_tag_id);
-                                 items.push((child_inode, FileType::Directory, name));
+             if let Some(inbox_path) = inbox_path_opt {
+                 tracing::info!("[readdir] INODE_INBOX: System inbox path = {}", inbox_path);
+                 // Add child tags of Inbox (tag_id=1) - still need DB for tags
+                 let mut conn_lock = state_guard.db_connection.lock().unwrap();
+                 if let Some(conn) = conn_lock.as_mut() {
+                     let child_tag_sql = "SELECT tag_id, name FROM tags WHERE parent_tag_id = 1";
+                     if let Ok(mut stmt) = conn.prepare(child_tag_sql) {
+                         if let Ok(rows) = stmt.query_map([], |row| {
+                             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+                         }) {
+                             for row in rows {
+                                 if let Ok((child_tag_id, name)) = row {
+                                     let child_inode = InodeStore::db_id_to_inode(child_tag_id);
+                                     items.push((child_inode, FileType::Directory, name));
+                                 }
                              }
                          }
-                     } else {
-                         tracing::error!("DB Error querying inbox child tags");
                      }
                  }
 
-                 // Second: Add files from inbox (tag_id=1)
-                 let sql = "
-                    SELECT f.inode, f.is_dir, ft.display_name
-                    FROM file_tags ft
-                    JOIN file_registry f ON ft.file_id = f.file_id
-                    WHERE ft.tag_id = 1
-                    ORDER BY f.file_id ASC
-                 ";
-                 if let Ok(mut stmt) = conn.prepare(sql) {
-                     if let Ok(rows) = stmt.query_map([], |row| {
-                         Ok((
-                             row.get::<_, u64>(0)?,
-                             row.get::<_, i32>(1)?,
-                             row.get::<_, String>(2)?
-                         ))
-                     }) {
-                         // COLLISION RESOLUTION: Count Names
-                         let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                 // PHASE 25: Physical files - use std::fs::read_dir, NOT SQL
+                 if let Ok(dir_entries) = std::fs::read_dir(&inbox_path) {
+                     let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-                         for row in rows {
-                             if let Ok((inode, is_dir, name)) = row {
-                                 let count = name_counts.entry(name.clone()).or_insert(0);
-                                 *count += 1;
-
-                                 let final_name = if *count > 1 {
-                                     format!("{} ({})", name, count)
-                                 } else {
-                                     name
-                                 };
-
-                                 let kind = if is_dir != 0 { FileType::Directory } else { FileType::RegularFile };
-                                 items.push((inode, kind, final_name));
+                     for entry in dir_entries.flatten() {
+                         if let Ok(file_name) = entry.file_name().into_string() {
+                             // Skip dotfiles and hidden files
+                             if file_name.starts_with('.') {
+                                 continue;
                              }
+
+                             // Count collisions for virtual naming (report (1).pdf)
+                             let count = name_counts.entry(file_name.clone()).or_insert(0);
+                             *count += 1;
+
+                             let final_name = if *count > 1 {
+                                 format!("{} ({})", file_name, count)
+                             } else {
+                                 file_name
+                             };
+
+                             // Determine file type and generate inode
+                             let is_dir = entry.file_type().map(|f| f.is_dir()).unwrap_or(false);
+                             let kind = if is_dir { FileType::Directory } else { FileType::RegularFile };
+
+                             // Generate inode from physical path for consistency
+                             let abs_path = entry.path().to_string_lossy().to_string();
+                             let inode = state_guard.inode_store.hash_to_inode(&abs_path);
+
+                             // Cache the path for lookup operations
+                             state_guard.inode_store.put_mirror_path(inode, abs_path);
+
+                             items.push((inode, kind, final_name));
                          }
-                     } else {
-                         tracing::error!("DB Error querying inbox file tags");
                      }
+                 } else {
+                     let err = std::fs::read_dir(&inbox_path).unwrap_err();
+                     tracing::error!("[readdir] INODE_INBOX: Failed to read directory '{}': {}", inbox_path, err);
                  }
+             } else {
+                 tracing::error!("[readdir] INODE_INBOX: No system inbox path configured");
              }
 
              for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
