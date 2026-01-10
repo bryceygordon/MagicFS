@@ -1,9 +1,7 @@
 # FILE: tests/cases/test_23_retagging.py
 from common import MagicTest
 import os
-import subprocess
 import sys
-import sqlite3
 import time
 
 test = MagicTest()
@@ -14,22 +12,24 @@ filename = "receipt.pdf"
 test.create_file(filename, "Amount: $100")
 test.wait_for_indexing(filename)
 
-# 2. Get File ID
-conn = sqlite3.connect(test.db_path)
-cursor = conn.cursor()
-cursor.execute("SELECT file_id FROM file_registry WHERE abs_path LIKE ?", (f"%{filename}",))
-file_id = cursor.fetchone()[0]
-conn.close()
+# 2. Get File ID using safe helper
+print("[Setup] Getting file ID...")
+results = test.safe_sqlite_query("SELECT file_id FROM file_registry WHERE abs_path LIKE ?", (f"%{filename}",))
+if not results:
+    print("❌ FAILURE: File not found in registry")
+    sys.exit(1)
+file_id = results[0][0]
 
-# 3. Inject Tags and Initial Link (File -> Inbox)
+# 3. Inject Tags and Initial Link (File -> Inbox) using safe transaction
 print("[Setup] Injecting tags 'inbox' and 'finance'...")
-setup_sql = f"""
-INSERT INTO tags (name, color) VALUES ('inbox', 'blue');
-INSERT INTO tags (name, color) VALUES ('finance', 'green');
-INSERT INTO file_tags (file_id, tag_id, display_name) 
-VALUES ({file_id}, (SELECT tag_id FROM tags WHERE name='inbox'), '{filename}');
-"""
-subprocess.run(["sudo", "sqlite3", test.db_path, setup_sql], check=True)
+sql_statements = [
+    "INSERT OR IGNORE INTO tags (name, color) VALUES ('inbox', 'blue')",
+    "INSERT OR IGNORE INTO tags (name, color) VALUES ('finance', 'green')",
+    f"INSERT INTO file_tags (file_id, tag_id, display_name) VALUES ({file_id}, (SELECT tag_id FROM tags WHERE name='inbox'), '{filename}')"
+]
+if not test.run_sql_transaction(sql_statements):
+    print("❌ FAILURE: Could not inject test data")
+    sys.exit(1)
 
 # 4. Verify Initial State
 inbox_path = os.path.join(test.mount_point, "tags", "inbox", filename)
@@ -57,20 +57,15 @@ if os.path.exists(inbox_path):
     print("❌ FAILURE: File still exists in Inbox after move.")
     sys.exit(1)
 
-# 7. Verify Database State
+# 7. Verify Database State using safe helper
 print("[Assert] Checking DB consistency...")
-conn = sqlite3.connect(test.db_path)
-cursor = conn.cursor()
-
-# Check that the 'inbox' link is gone or updated
-cursor.execute("""
-    SELECT t.name 
-    FROM file_tags ft 
-    JOIN tags t ON ft.tag_id = t.tag_id 
+results = test.safe_sqlite_query("""
+    SELECT t.name
+    FROM file_tags ft
+    JOIN tags t ON ft.tag_id = t.tag_id
     WHERE ft.file_id = ?
 """, (file_id,))
-tags = [r[0] for r in cursor.fetchall()]
-conn.close()
+tags = [r[0] for r in results]
 
 print(f"  Current Tags: {tags}")
 

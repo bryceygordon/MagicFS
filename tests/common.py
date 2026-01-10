@@ -65,8 +65,8 @@ class MagicTest:
         """Robust DB count using sudo sqlite3 to handle daemon WAL locks."""
         try:
             result = subprocess.run(
-                ["sudo", "sqlite3", self.db_path, "SELECT count(*) FROM file_registry;"],
-                capture_output=True, text=True, timeout=5
+                ["sudo", "sqlite3", "-cmd", ".timeout 5000", self.db_path, "SELECT count(*) FROM file_registry;"],
+                capture_output=True, text=True, timeout=8
             )
             if result.returncode == 0 and result.stdout.strip():
                 return int(result.stdout.strip())
@@ -93,8 +93,8 @@ class MagicTest:
         for attempt in range(max_retries):
             try:
                 result = subprocess.run(
-                    ["sudo", "sqlite3", "-readonly", self.db_path, sql],
-                    capture_output=True, text=True, timeout=10
+                    ["sudo", "sqlite3", "-cmd", ".timeout 5000", "-readonly", self.db_path, sql],
+                    capture_output=True, text=True, timeout=15
                 )
 
                 if result.returncode == 0:
@@ -129,6 +129,136 @@ class MagicTest:
 
         return []
 
+    def run_sql_transaction(self, sql_statements, max_retries=10, retry_delay=0.5):
+        """
+        Execute multiple SQL statements as a single transaction using sudo sqlite3.
+        This is more robust than individual subprocess calls.
+
+        Args:
+            sql_statements: List of SQL statements to execute in sequence
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Combine statements into a single transaction
+        transaction_sql = "BEGIN TRANSACTION; " + "; ".join(sql_statements) + "; COMMIT;"
+
+        for attempt in range(max_retries):
+            try:
+                result = subprocess.run(
+                    ["sudo", "sqlite3", "-cmd", ".timeout 5000", self.db_path, transaction_sql],
+                    capture_output=True, text=True, timeout=20
+                )
+
+                if result.returncode == 0:
+                    return True
+
+                # Check if it's a database locked error
+                if "database is locked" in result.stderr.lower() or "SQLITE_BUSY" in result.stderr:
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] Database locked during transaction, retrying... ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+
+                # Other errors
+                print(f"[ERROR] SQL transaction failed: {result.stderr}")
+                return False
+
+            except subprocess.TimeoutExpired:
+                print(f"[WARN] Transaction timeout, retrying... ({attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("[ERROR] Transaction timeout after max retries")
+                    return False
+            except Exception as e:
+                print(f"[ERROR] Exception running SQL transaction: {e}")
+                return False
+
+        return False
+
+    def safe_sqlite_query(self, query, params=(), max_retries=10, retry_delay=0.5):
+        """
+        Safely execute a SQL query using Python sqlite3 with timeout protection.
+        Uses timeout parameter and retry logic to handle database locks.
+
+        Args:
+            query: SQL query string
+            params: Query parameters tuple
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            List of rows, or empty list on failure
+        """
+        for attempt in range(max_retries):
+            try:
+                # Set timeout to allow waiting for locks
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                result = cursor.fetchall()
+                conn.close()
+
+                # Convert rows to list of tuples for consistency
+                return [tuple(row) for row in result]
+
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e).lower() or "SQLITE_BUSY" in str(e):
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] Database locked in safe_sqlite_query, retrying... ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                print(f"[ERROR] SQLite operational error: {e}")
+                return []
+            except Exception as e:
+                print(f"[ERROR] Exception in safe_sqlite_query: {e}")
+                return []
+
+        return []
+
+    def safe_sqlite_execute(self, query, params=(), max_retries=10, retry_delay=0.5):
+        """
+        Safely execute a SQL statement using Python sqlite3 with timeout protection.
+        For INSERT/UPDATE/DELETE operations.
+
+        Args:
+            query: SQL statement string
+            params: Query parameters tuple
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            True if successful, False otherwise
+        """
+        for attempt in range(max_retries):
+            try:
+                # Set timeout to allow waiting for locks
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                conn.commit()
+                conn.close()
+                return True
+
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e).lower() or "SQLITE_BUSY" in str(e):
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] Database locked in safe_sqlite_execute, retrying... ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                print(f"[ERROR] SQLite operational error: {e}")
+                return False
+            except Exception as e:
+                print(f"[ERROR] Exception in safe_sqlite_execute: {e}")
+                return False
+
+        return False
+
     def run_sql_exec(self, sql, max_retries=10, retry_delay=0.5):
         """
         Execute a SQL statement using sudo sqlite3 with retry logic for database locks.
@@ -145,8 +275,8 @@ class MagicTest:
         for attempt in range(max_retries):
             try:
                 result = subprocess.run(
-                    ["sudo", "sqlite3", self.db_path, sql],
-                    capture_output=True, text=True, timeout=10
+                    ["sudo", "sqlite3", "-cmd", ".timeout 5000", self.db_path, sql],
+                    capture_output=True, text=True, timeout=15
                 )
 
                 if result.returncode == 0:

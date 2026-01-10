@@ -1,16 +1,17 @@
 # FILE: tests/cases/test_26_mkdir.py
 from common import MagicTest
 import os
-import subprocess
 import sys
 import time
 
 test = MagicTest()
 print("--- TEST 26: mkdir (Hierarchical Tag Creation) ---")
 
-# 1. Setup: Ensure we start with a clean tags table
+# 1. Setup: Ensure we start with a clean tags table using safe transaction
 print("[Setup] Cleaning up any existing test tags...")
-subprocess.run(["sudo", "sqlite3", test.db_path, "DELETE FROM tags WHERE name IN ('projects', 'work', 'personal');"], check=True)
+if not test.run_sql_transaction(["DELETE FROM tags WHERE name IN ('projects', 'work', 'personal')"]):
+    print("❌ FAILURE: Could not clean up existing tags")
+    sys.exit(1)
 
 # 2. Create root-level tag via mkdir
 print("[Action] mkdir /magic/tags/projects")
@@ -21,17 +22,15 @@ except Exception as e:
     print(f"❌ FAILURE: Could not create root tag: {e}")
     sys.exit(1)
 
-# 3. Verify in database
+# 3. Verify in database using safe helper
 print("[Verify] Checking database...")
-cmd = ["sudo", "sqlite3", test.db_path, "SELECT tag_id, parent_tag_id, name FROM tags WHERE name = 'projects'"]
-result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-output = result.stdout.strip()
-if output:
-    parts = output.split('|')
-    if len(parts) >= 3 and parts[2] == 'projects' and parts[1] == '':
-        print(f"✅ Tag 'projects' exists in DB with tag_id={parts[0]}")
+results = test.safe_sqlite_query("SELECT tag_id, parent_tag_id, name FROM tags WHERE name = 'projects'")
+if results:
+    row = results[0]
+    if len(row) >= 3 and row[2] == 'projects' and (row[1] is None or row[1] == ''):
+        print(f"✅ Tag 'projects' exists in DB with tag_id={row[0]}")
     else:
-        print(f"❌ FAILURE: Tag not found in DB or incorrect structure: {output}")
+        print(f"❌ FAILURE: Tag not found in DB or incorrect structure: {row}")
         sys.exit(1)
 else:
     print("❌ FAILURE: Tag 'projects' not found in DB")
@@ -46,21 +45,19 @@ except Exception as e:
     print(f"❌ FAILURE: Could not create nested tag: {e}")
     sys.exit(1)
 
-# 5. Verify nested structure
-cmd = ["sudo", "sqlite3", test.db_path, """
+# 5. Verify nested structure using safe helper
+results = test.safe_sqlite_query("""
     SELECT t1.tag_id, t1.parent_tag_id, t1.name, t2.tag_id as parent_id
     FROM tags t1
     LEFT JOIN tags t2 ON t1.parent_tag_id = t2.tag_id
     WHERE t1.name = 'work'
-"""]
-result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-output = result.stdout.strip()
-if output:
-    parts = output.split('|')
-    if len(parts) >= 4 and parts[2] == 'work' and parts[1] != '' and parts[3] != '':
-        print(f"✅ Nested tag 'work' exists with parent_id={parts[1]}")
+""")
+if results:
+    row = results[0]
+    if len(row) >= 4 and row[2] == 'work' and row[1] not in (None, '') and row[3] not in (None, ''):
+        print(f"✅ Nested tag 'work' exists with parent_id={row[1]}")
     else:
-        print(f"❌ FAILURE: Nested tag structure incorrect: {output}")
+        print(f"❌ FAILURE: Nested tag structure incorrect: {row}")
         sys.exit(1)
 else:
     print("❌ FAILURE: Nested tag 'work' not found")
@@ -90,17 +87,13 @@ except Exception as e:
     print(f"❌ FAILURE: Should allow same name under different parent: {e}")
     sys.exit(1)
 
-# 8. Verify all tags in DB
-cmd = ["sudo", "sqlite3", test.db_path, "SELECT name, parent_tag_id FROM tags ORDER BY tag_id"]
-result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+# 8. Verify all tags in DB using safe helper
+results = test.safe_sqlite_query("SELECT name, parent_tag_id FROM tags ORDER BY tag_id")
 all_tags = []
-for line in result.stdout.strip().split('\n'):
-    if line.strip():
-        parts = line.split('|')
-        if len(parts) >= 2:
-            name = parts[0]
-            parent = parts[1] if parts[1] else 'NULL'
-            all_tags.append((name, parent))
+for row in results:
+    name = row[0]
+    parent = row[1] if row[1] else 'NULL'
+    all_tags.append((name, parent))
 print(f"[Info] All tags in DB: {all_tags}")
 
 print("✅ MKDIR TEST PASSED")
