@@ -26,6 +26,20 @@ impl Indexer {
             Err(e) => return Err(e),
         };
 
+        // PHASE 24.1: Hardening - Bouncer Logic
+        // Skip non-empty files that produce empty text (binaries, huge files, etc.)
+        // But allow 0-byte files to proceed (valid filesystem citizens)
+        if text_content.trim().is_empty() {
+            let metadata = std::fs::metadata(&file_path).map_err(MagicError::Io)?;
+            if metadata.len() > 0 {
+                // Non-empty file with no text = Skip (Bouncer)
+                tracing::debug!("[Indexer] Non-empty file produced no text, skipping: {}", file_path);
+                return Ok(());
+            }
+            // Zero-byte file = Proceed (Citizen)
+            tracing::debug!("[Indexer] Zero-byte file proceeding: {}", file_path);
+        }
+
         // 2. Chunking (even empty files produce empty chunks)
         let chunks = crate::storage::text_extraction::chunk_text(&text_content);
 
