@@ -109,4 +109,4 @@ IOIOIOIO# MagicFS Roadmap & Charter
 - [x] **Phase 24: Zero-Byte Citizenship:** Removed retry loop for empty files; treated as valid content.
 - [x] **Phase 24.1: Hardening Regression:** Restored Bouncer logic to reject non-empty files yielding empty text (binaries).
 - [x] **Phase 25: The Polite Inbox:** `INODE_INBOX` mirrors physical disk; Indexer yields to active writers.
-- [ ] **Regression Fix:** Investigate `SQLITE_BUSY` errors in integration tests caused by concurrent Daemon/Test DB access.
+- [x] **Regression Fix:** Investigate `SQLITE_BUSY` errors in integration tests caused by concurrent Daemon/Test DB access.

@@ -77,6 +77,106 @@ class MagicTest:
             print(f"[WARN] get_db_count exception: {e}")
             return 0
 
+    def run_sql_query(self, sql, max_retries=10, retry_delay=0.5):
+        """
+        Execute a SQL query using sudo sqlite3 with retry logic for database locks.
+        Returns list of tuples for SELECT queries, or None for other queries.
+
+        Args:
+            sql: SQL query string
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            List of tuples for SELECT queries, or empty list for queries without results
+        """
+        for attempt in range(max_retries):
+            try:
+                result = subprocess.run(
+                    ["sudo", "sqlite3", "-readonly", self.db_path, sql],
+                    capture_output=True, text=True, timeout=10
+                )
+
+                if result.returncode == 0:
+                    # Parse output for SELECT queries
+                    if result.stdout.strip():
+                        lines = result.stdout.strip().split('\n')
+                        return [tuple(line.split('|')) for line in lines if line]
+                    return []
+
+                # Check if it's a database locked error
+                if "database is locked" in result.stderr.lower() or "SQLITE_BUSY" in result.stderr:
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] Database locked, retrying... ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+
+                # Other errors
+                print(f"[ERROR] SQL query failed: {result.stderr}")
+                return []
+
+            except subprocess.TimeoutExpired:
+                print(f"[WARN] Query timeout, retrying... ({attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("[ERROR] Query timeout after max retries")
+                    return []
+            except Exception as e:
+                print(f"[ERROR] Exception running SQL query: {e}")
+                return []
+
+        return []
+
+    def run_sql_exec(self, sql, max_retries=10, retry_delay=0.5):
+        """
+        Execute a SQL statement using sudo sqlite3 with retry logic for database locks.
+        For INSERT/UPDATE/DELETE operations.
+
+        Args:
+            sql: SQL statement string
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            True if successful, False otherwise
+        """
+        for attempt in range(max_retries):
+            try:
+                result = subprocess.run(
+                    ["sudo", "sqlite3", self.db_path, sql],
+                    capture_output=True, text=True, timeout=10
+                )
+
+                if result.returncode == 0:
+                    return True
+
+                # Check if it's a database locked error
+                if "database is locked" in result.stderr.lower() or "SQLITE_BUSY" in result.stderr:
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] Database locked during exec, retrying... ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+
+                # Other errors
+                print(f"[ERROR] SQL exec failed: {result.stderr}")
+                return False
+
+            except subprocess.TimeoutExpired:
+                print(f"[WARN] Exec timeout, retrying... ({attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("[ERROR] Exec timeout after max retries")
+                    return False
+            except Exception as e:
+                print(f"[ERROR] Exception running SQL exec: {e}")
+                return False
+
+        return False
+
     def wait_for_stable_db(self, stability_duration=3, max_wait=120):
         """
         Polls the DB. 
@@ -127,15 +227,40 @@ class MagicTest:
         sys.exit(1)
 
     def check_file_in_db(self, filename_substr):
+        """Check if a file is indexed in the database using sudo sqlite3."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT abs_path FROM file_registry")
-            files = [row[0] for row in cursor.fetchall()]
-            conn.close()
+            result = self.run_sql_query("SELECT abs_path FROM file_registry")
+            files = [row[0] for row in result]
             return any(filename_substr in f for f in files)
         except:
             return False
+
+    def get_file_id_by_path(self, file_path, max_retries=5):
+        """
+        Get the file_id for a specific file path using sudo sqlite3.
+        Returns None if not found or on error.
+
+        Args:
+            file_path: Full path to the file
+            max_retries: Number of retry attempts
+
+        Returns:
+            File ID as integer, or None if not found/error
+        """
+        sql = f"SELECT file_id FROM file_registry WHERE abs_path = '{file_path}'"
+        for attempt in range(max_retries):
+            try:
+                result = self.run_sql_query(sql)
+                if result and len(result) > 0:
+                    return int(result[0][0])
+                return None
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(0.5)
+                    continue
+                print(f"[ERROR] Failed to get file ID for {file_path}: {e}")
+                return None
+        return None
 
     def assert_file_indexed(self, filename_substr):
         if self.check_file_in_db(filename_substr):

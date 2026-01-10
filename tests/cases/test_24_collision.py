@@ -1,9 +1,7 @@
 # FILE: tests/cases/test_24_collision.py
 from common import MagicTest
 import os
-import subprocess
 import sys
-import sqlite3
 import time
 
 test = MagicTest()
@@ -30,14 +28,14 @@ with open(path_b, "w") as f: f.write("This is substantial Content B")
 test.wait_for_indexing("folder_A/report.pdf")
 test.wait_for_indexing("folder_B/report.pdf")
 
-# 3. Get IDs
-conn = sqlite3.connect(test.db_path)
-cursor = conn.cursor()
-cursor.execute("SELECT file_id FROM file_registry WHERE abs_path = ?", (path_a,))
-id_a = cursor.fetchone()[0]
-cursor.execute("SELECT file_id FROM file_registry WHERE abs_path = ?", (path_b,))
-id_b = cursor.fetchone()[0]
-conn.close()
+# 3. Get IDs using the new helper method
+id_a = test.get_file_id_by_path(path_a)
+id_b = test.get_file_id_by_path(path_b)
+
+if id_a is None or id_b is None:
+    print("❌ FAILURE: Could not retrieve file IDs")
+    test.dump_logs()
+    sys.exit(1)
 
 # 4. Inject Tag 'work' and link BOTH files
 print("[Setup] Tagging both files as 'work'...")
@@ -46,7 +44,11 @@ INSERT INTO tags (name) VALUES ('work');
 INSERT INTO file_tags (file_id, tag_id, display_name) VALUES ({id_a}, (SELECT tag_id FROM tags WHERE name='work'), '{filename}');
 INSERT INTO file_tags (file_id, tag_id, display_name) VALUES ({id_b}, (SELECT tag_id FROM tags WHERE name='work'), '{filename}');
 """
-subprocess.run(["sudo", "sqlite3", test.db_path, setup_sql], check=True)
+success = test.run_sql_exec(setup_sql)
+if not success:
+    print("❌ FAILURE: Could not inject tags")
+    test.dump_logs()
+    sys.exit(1)
 
 # 5. List the Tag View
 view_path = os.path.join(test.mount_point, "tags", "work")
