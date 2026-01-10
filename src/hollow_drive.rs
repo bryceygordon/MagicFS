@@ -148,7 +148,7 @@ impl Filesystem for HollowDrive {
                     tracing::debug!("[lookup] Returning INODE_INBOX (7) for 'inbox'");
                     reply.entry(&ttl, &mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755), 0);
                 },
-                "tags" => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o555), 0),
+                "tags" => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o755), 0),
                 _ => reply.error(libc::ENOENT),
             }
             return;
@@ -190,7 +190,7 @@ impl Filesystem for HollowDrive {
         // 4. Tags Root
         if parent == INODE_TAGS {
             match name_str {
-                "." | ".." => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o555), 0),
+                "." | ".." => reply.entry(&ttl, &mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o755), 0),
                 _ => {
                     // Check DB for tag existence
                     let state_guard = self.state.read().unwrap();
@@ -517,7 +517,7 @@ impl Filesystem for HollowDrive {
             INODE_SEARCH => { attr.perm = 0o555; },
             INODE_REFRESH => { attr.kind = fuser::FileType::RegularFile; attr.size = 0; attr.perm = 0o666; attr.nlink = 1; }, 
             INODE_MIRROR => {}, 
-            INODE_TAGS => { attr.perm = 0o555; },
+            INODE_TAGS => { attr.perm = 0o755; },
             INODE_INBOX => { attr.perm = 0o755; },
             _ => {
                 if InodeStore::is_persistent(ino) {
