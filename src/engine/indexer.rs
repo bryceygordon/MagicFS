@@ -26,27 +26,10 @@ impl Indexer {
             Err(e) => return Err(e),
         };
 
-        if text_content.trim().is_empty() {
-            if let Ok(m) = std::fs::metadata(&file_path) {
-                if m.len() > 0 {
-                    tracing::warn!("[Indexer] Skipping NON-EMPTY file that produced 0 text (Binary?): {}", file_path);
-                } else {
-                    tracing::warn!("[Indexer] Skipping truly empty file: {}", file_path);
-                }
-            }
-            return Ok(());
-        }
-
-        // 2. Chunking
+        // 2. Chunking (even empty files produce empty chunks)
         let chunks = crate::storage::text_extraction::chunk_text(&text_content);
-        if chunks.is_empty() {
-            tracing::warn!("[Indexer] File has content but produced 0 chunks: {}", file_path);
-            return Ok(());
-        }
 
-        tracing::debug!("[Indexer] {} split into {} chunks", file_path, chunks.len());
-
-        // 3. Register File & Clean Old Data
+        // 3. Register File & Clean Old Data (ALWAYS RUN - even for empty files)
         let (file_id, _inode) = {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             // Acquire mutable lock for registration
@@ -66,30 +49,54 @@ impl Indexer {
                 &file_path, inode, mtime, size, is_dir
             )?;
 
+            // Always clear old embeddings
             repo.delete_embeddings_for_file(fid)?;
+
+            // Validate what we just learned from the metadata
+            if size == 0 {
+                tracing::debug!("[Indexer] Zero-byte file registered: {}", file_path);
+            } else if text_content.trim().is_empty() {
+                tracing::warn!("[Indexer] Non-empty file produced no text: {}", file_path);
+            }
+
             (fid, inode)
         };
 
-        // 4. Generate Embeddings (BATCHED)
-        // is_query = false (We are indexing DOCUMENTS)
-        // This sends ALL chunks to the GPU/CPU in one go.
-        let embeddings_batch = request_embedding_batch(&state, chunks, false).await?;
+        // 4. Generate Embeddings ONLY if we have chunks
+        if !chunks.is_empty() {
+            tracing::debug!("[Indexer] {} split into {} chunks", file_path, chunks.len());
 
-        // 5. Insert Embeddings (TRANSACTIONAL)
+            // is_query = false (We are indexing DOCUMENTS)
+            // This sends ALL chunks to the GPU/CPU in one go.
+            let embeddings_batch = request_embedding_batch(&state, chunks, false).await?;
+
+            // 5. Insert Embeddings (TRANSACTIONAL)
+            {
+                let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+                let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
+                // We need a mutable connection for transactions
+                let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
+
+                // 'repo' needs to be mut because insert_embeddings_batch is &mut self
+                let mut repo = Repository::new(conn);
+
+                if let Err(e) = repo.insert_embeddings_batch(file_id, embeddings_batch) {
+                    tracing::warn!("[Indexer] Failed to insert batch: {}", e);
+                }
+            }
+        } else {
+            tracing::debug!("[Indexer] No chunks for {} - skipping embedding generation", file_path);
+            // The transaction that cleared old embeddings (line 69) is sufficient
+            // This file will have file_registry entry but empty vec_index
+        }
+
+        // 6. Apply Phase 17 Auto-Tagging (for ALL files, including empty)
         {
             let state_guard = state.read().map_err(|_| MagicError::State("Poisoned lock".into()))?;
             let mut conn_lock = state_guard.db_connection.lock().map_err(|_| MagicError::State("Poisoned lock".into()))?;
-            // We need a mutable connection for transactions
             let conn = conn_lock.as_mut().ok_or_else(|| MagicError::Other(anyhow::anyhow!("Database not initialized")))?;
-
-            // 'repo' needs to be mut because insert_embeddings_batch is &mut self
             let mut repo = Repository::new(conn);
 
-            if let Err(e) = repo.insert_embeddings_batch(file_id, embeddings_batch) {
-                tracing::warn!("[Indexer] Failed to insert batch: {}", e);
-            }
-
-            // --- PHASE 17: AUTO-TAG INBOX FILES ---
             // Check if file is in system inbox and auto-link to Tag ID 1
             let is_in_inbox = {
                 let inbox_path_guard = state_guard.system_inbox_path.lock().unwrap();
@@ -113,10 +120,9 @@ impl Indexer {
                     tracing::debug!("[Indexer] Successfully linked file_id={} to tag_id=1", file_id);
                 }
             }
-            // --- END PHASE 17 ---
         }
 
-        // 6. Invalidate Caches
+        // 7. Invalidate Caches
         Self::invalidate_cache(state)?;
         tracing::info!("[Indexer] Indexed {} (ID: {})", file_path, file_id);
         Ok(())
@@ -161,16 +167,13 @@ impl Indexer {
             }
             // ------------------------------------
 
+            // PHASE 24 FIX: Zero-Byte Citizenship
+            // Remove the sleep/retry loop for 0-byte files. Treat them as valid final state.
             if let Ok(m) = std::fs::metadata(path) {
                 if m.len() == 0 {
-                    if attempt < max_retries {
-                        tracing::debug!("[Indexer] File {} is 0 bytes (attempt {}/{}), waiting...", path, attempt, max_retries);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    } else {
-                        tracing::warn!("[Indexer] File {} is still 0 bytes after {} retries. Treating as empty.", path, max_retries);
-                        return Ok(String::new());
-                    }
+                    // ZERO-BYTE FILES ARE CITIZENS TOO!
+                    tracing::debug!("[Indexer] File {} is 0 bytes - treating as valid empty content", path);
+                    return Ok(String::new());
                 }
             }
 
@@ -195,7 +198,7 @@ impl Indexer {
                 }
             }
         }
-        
+
         tracing::warn!("[Indexer] Failed to extract from {} after retries. Last error: {:?}", path, last_error);
         if let Some(e) = last_error { Err(e) } else { Ok(String::new()) }
     }
