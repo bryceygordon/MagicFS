@@ -106,3 +106,4 @@ IOIOIOIO# MagicFS Roadmap & Charter
 - [x] **Omnibus Repair:** Fixed permissions, paths, and logic gaps in the new root hierarchy.
 
 - [x] **Phase 23: Transient File Suppression:** Librarian filters `.part/.tmp`, Indexer handles vanished files gracefully.
+- [x] **Phase 24: Zero-Byte Citizenship:** Removed retry loop for empty files; treated as valid content.
