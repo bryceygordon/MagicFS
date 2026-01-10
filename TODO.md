@@ -107,3 +107,4 @@ IOIOIOIO# MagicFS Roadmap & Charter
 
 - [x] **Phase 23: Transient File Suppression:** Librarian filters `.part/.tmp`, Indexer handles vanished files gracefully.
 - [x] **Phase 24: Zero-Byte Citizenship:** Removed retry loop for empty files; treated as valid content.
+- [x] **Phase 24.1: Hardening Regression:** Restored Bouncer logic to reject non-empty files yielding empty text (binaries).
