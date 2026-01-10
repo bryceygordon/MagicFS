@@ -111,4 +111,4 @@ IOIOIOIO# MagicFS Roadmap & Charter
 - [x] **Phase 25: The Polite Inbox:** `INODE_INBOX` mirrors physical disk; Indexer yields to active writers.
 - [x] **Regression Fix:** Investigate `SQLITE_BUSY` errors in integration tests caused by concurrent Daemon/Test DB access.
 - [x] **Phase 26: Unlocking Taxonomy:** Enabled `0o755` permissions on `/magic/tags` to allow GUI `mkdir`.
-- [ ] **Harness Repair:** Fix `SQLITE_BUSY` in integration tests by adding timeouts to CLI invocations.
+- [x] **Harness Repair:** Fix `SQLITE_BUSY` in integration tests by adding timeouts to CLI invocations.
