@@ -32,26 +32,54 @@ export MAGICFS_LOG_FILE=$(pwd)/"$LOG_FILE"
 export MAGICFS_DATA_DIR="$SYSTEM_DATA_DIR"
 export RUST_LOG=debug
 
-# Keep sudo alive
-sudo -v
-( while true; do sudo -v; sleep 60; done; ) > /dev/null 2>&1 &
-SUDO_KEEPALIVE_PID=$!
+# Detect if running as root/sudo or user
+if [ "$(id -u)" -eq 0 ]; then
+    echo "⚠️  Running as root (Phase 40: Robin Hood mode)"
+    IS_ROOT=true
+    SUDO_CMD=""
+else
+    echo "✅ Running as user (Phase 40: Just Works mode)"
+    IS_ROOT=false
+    SUDO_CMD="sudo"
+fi
+
+# Keep sudo alive only if we need it
+if [ "$IS_ROOT" = "false" ]; then
+    sudo -v
+    ( while true; do sudo -v; sleep 60; done; ) > /dev/null 2>&1 &
+    SUDO_KEEPALIVE_PID=$!
+fi
 
 cleanup_environment() {
     # 1. Kill Daemon
-    sudo pkill -15 -x magicfs 2>/dev/null
-    # sleep 0.5
-    sudo pkill -9 -x magicfs 2>/dev/null
+    if [ "$IS_ROOT" = "false" ]; then
+        $SUDO_CMD pkill -15 -x magicfs 2>/dev/null
+        # sleep 0.5
+        $SUDO_CMD pkill -9 -x magicfs 2>/dev/null
+    else
+        pkill -15 -x magicfs 2>/dev/null
+        pkill -9 -x magicfs 2>/dev/null
+    fi
 
     # 2. Force Unmount (The Zombie Fix)
     if mount | grep -q "$MOUNT_POINT"; then
-        sudo umount -l "$MOUNT_POINT" 2>/dev/null
+        if [ "$IS_ROOT" = "false" ]; then
+            $SUDO_CMD umount -l "$MOUNT_POINT" 2>/dev/null
+        else
+            umount -l "$MOUNT_POINT" 2>/dev/null
+        fi
     fi
 
     # 3. Wipe Data
-    sudo rm -f "$DB_PATH" 2>/dev/null
-    sudo rm -rf "$MOUNT_POINT" "$WATCH_DIR" "$SYSTEM_DATA_DIR" 2>/dev/null
-    # Ensure parent dir exists
+    if [ "$IS_ROOT" = "false" ]; then
+        $SUDO_CMD rm -f "$DB_PATH" 2>/dev/null
+        $SUDO_CMD rm -rf "$MOUNT_POINT" "$WATCH_DIR" "$SYSTEM_DATA_DIR" 2>/dev/null
+    else
+        rm -f "$DB_PATH" 2>/dev/null
+        rm -rf "$MOUNT_POINT" "$WATCH_DIR" "$SYSTEM_DATA_DIR" 2>/dev/null
+    fi
+
+    # Ensure parent dir exists (no sudo needed, we own /tmp)
     mkdir -p "$(dirname "$DB_PATH")"
 
     # 4. Recreate Dirs
@@ -88,7 +116,11 @@ for test_file in "${ALL_TESTS[@]}"; do
     
     # B. Launch Daemon (Fresh Instance)
     # We truncate the log file for each test to make debugging easier
-    sudo -E nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
+    if [ "$IS_ROOT" = "false" ]; then
+        $SUDO_CMD -E nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
+    else
+        nohup $BINARY "$MOUNT_POINT" "$WATCH_DIR" > "$LOG_FILE" 2>&1 &
+    fi
     
     # Wait for daemon to stabilize (HollowDrive ready)
     # Nomic might take a moment to download on first run
@@ -123,8 +155,13 @@ done
 
 # Final Cleanup
 cleanup_environment
-if [ ! -z "$SUDO_KEEPALIVE_PID" ]; then
+if [ "$IS_ROOT" = "false" ] && [ ! -z "$SUDO_KEEPALIVE_PID" ]; then
     kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
 fi
 
 echo -e "\n🎉 ALL TESTS PASSED SUCCESSFULLY"
+if [ "$IS_ROOT" = "false" ]; then
+    echo "   Phase 40 Just Works Mode: ✅ Verified"
+else
+    echo "   Phase 40 Robin Hood Mode: ✅ Verified"
+fi

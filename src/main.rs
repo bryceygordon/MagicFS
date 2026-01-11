@@ -5,7 +5,7 @@ use magicfs::{oracle::Oracle, librarian::Librarian, hollow_drive::HollowDrive};
 use anyhow::Result;
 use std::env;
 use std::sync::Arc;
-use fuser::{mount2, MountOption};
+use fuser::mount2;
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, EnvFilter};
 use dirs;
@@ -139,9 +139,17 @@ async fn main() -> Result<()> {
         *inbox_path_guard = Some(system_inbox_dir.to_string_lossy().to_string());
     }
 
+    // Phase 40: Get identity-aware mount options BEFORE giving state to HollowDrive
+    let mount_options = {
+        let state_guard = global_state.read().unwrap();
+        state_guard.identity.get_mount_options()
+    };
+
+    tracing::info!("Phase 40: Mounting with options: {:?}", mount_options);
+
+    // Create HollowDrive with the state
     let hollow_drive = HollowDrive::new(global_state);
 
-    let mount_options = vec![MountOption::AllowOther, MountOption::AutoUnmount];
     match mount2(hollow_drive, &mountpoint, &mount_options) {
         Ok(_) => tracing::info!("FUSE mounted successfully"),
         Err(e) => tracing::error!("FUSE mount failed: {}", e),

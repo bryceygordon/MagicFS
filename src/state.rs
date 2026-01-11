@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use crate::error::MagicError;
 use crate::core::inode_store::InodeStore;
+use crate::core::permissions::Identity;
 use std::collections::HashMap;
 use std::time::SystemTime; // Added import
 use std::sync::atomic::AtomicU8;
@@ -116,6 +117,9 @@ pub struct GlobalState {
 
     /// Phase 17: System inbox directory path (for automatic Tag ID 1 tagging)
     pub system_inbox_path: Arc<std::sync::Mutex<Option<String>>>,
+
+    /// Phase 40: Identity management for Robin Hood Protocol
+    pub identity: Arc<Identity>,
 }
 
 /// Result of a semantic search operation
@@ -144,6 +148,7 @@ impl Default for GlobalState {
             start_time: SystemTime::now(), // Anchor established on boot
             system_state: Arc::new(AtomicU8::new(SystemState::Booting.as_u8())),
             system_inbox_path: Arc::new(std::sync::Mutex::new(None)), // Phase 17
+            identity: Arc::new(Identity::capture()), // Phase 40: Capture identity immediately
         }
     }
 }

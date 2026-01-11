@@ -1049,6 +1049,22 @@ impl Filesystem for HollowDrive {
                  return;
              }
 
+             // Phase 40: Ensure ownership is maintained after rename
+             {
+                 let identity = {
+                     let state_guard = self.state.read().unwrap();
+                     *state_guard.identity
+                 };
+
+                 if let Err(e) = identity.enforce_ownership(&new_path) {
+                     tracing::error!("[HollowDrive] Failed to enforce ownership after inbox rename: {}", e);
+                     // Try to revert
+                     let _ = std::fs::rename(&new_path, &old_path);
+                     reply.error(libc::EIO);
+                     return;
+                 }
+             }
+
              // 3. Success (Librarian will handle DB updates via inotify)
              tracing::info!("[HollowDrive] Atomic rename in Inbox: {} -> {}", name_str, newname_str);
              reply.ok();
@@ -1125,6 +1141,22 @@ impl Filesystem for HollowDrive {
                  tracing::error!("[HollowDrive] Failed to move file from inbox: {}", e);
                  reply.error(err);
                  return;
+             }
+
+             // Phase 40: Enforce ownership after the move
+             {
+                 let identity = {
+                     let state_guard = self.state.read().unwrap();
+                     *state_guard.identity
+                 };
+
+                 if let Err(e) = identity.enforce_ownership(&physical_path) {
+                     tracing::error!("[HollowDrive] Failed to enforce ownership after move: {}", e);
+                     // Try to undo the move
+                     let _ = std::fs::rename(&physical_path, &source_path);
+                     reply.error(libc::EIO);
+                     return;
+                 }
              }
 
              // 7. Update DB (FIXED: UPDATE existing entry to preserve inode lookup integrity)
@@ -1387,6 +1419,10 @@ impl Filesystem for HollowDrive {
 
             let legacy_path = import_dir.join(name_str);
             tracing::debug!("[create] Final legacy path: {:?}", legacy_path);
+
+            // Phase 40: Ensure import directory has proper ownership
+            // Note: We don't enforce on import_dir itself (might be shared), just files
+            // This prevents breaking other apps that might use _imported
             legacy_path
         };
         let physical_path_str = physical_path.to_string_lossy().to_string();
@@ -1396,10 +1432,14 @@ impl Filesystem for HollowDrive {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&physical_path) 
+            .open(&physical_path)
         {
-            Ok(f) => f,
+            Ok(f) => {
+                tracing::debug!("[create] File opened successfully: {}", physical_path_str);
+                f
+            },
             Err(e) => {
+                tracing::error!("[create] Failed to open file {}: {}", physical_path_str, e);
                 let err = match e.kind() {
                     std::io::ErrorKind::PermissionDenied => libc::EACCES,
                     _ => libc::EIO,
@@ -1419,13 +1459,28 @@ impl Filesystem for HollowDrive {
         let mtime = meta.modified().unwrap_or(SystemTime::now())
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
 
-        // 5. Database Registration
-        let tag_id = if parent == INODE_INBOX {
-            1u64 // Inbox is always Tag 1
-        } else {
-            InodeStore::inode_to_db_id(parent)
+        // Phase 40: Enforce ownership immediately after file creation
+        tracing::debug!("[create] About to get identity from state for path: {}", physical_path_str);
+        let identity = {
+            let state_guard = self.state.read().unwrap();
+            *state_guard.identity
         };
-        
+        tracing::debug!("[create] Got identity - is_root={}, uid={}, gid={}", identity.is_root, identity.uid, identity.gid);
+
+        // Check if file exists before calling enforce_ownership
+        tracing::debug!("[create] File exists before enforce_ownership: {}", physical_path.exists());
+
+        // Robin Hood: Enforce user ownership on the created file
+        if let Err(e) = identity.enforce_ownership(&physical_path) {
+            tracing::error!("[create] Failed to enforce ownership: {}", e);
+            // Clean up the file we just created
+            let _ = std::fs::remove_file(&physical_path);
+            reply.error(libc::EIO);
+            return;
+        }
+        tracing::debug!("[create] Ownership enforcement successful for: {}", physical_path_str);
+
+        // Reacquire state guard for DB operations
         let state_guard = self.state.read().unwrap();
         let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
@@ -1435,9 +1490,16 @@ impl Filesystem for HollowDrive {
                 Err(_) => { reply.error(libc::EIO); return; }
             };
 
+            // Determine tag_id for database registration
+            let tag_id = if parent == INODE_INBOX {
+                1u64 // Inbox is always Tag 1
+            } else {
+                InodeStore::inode_to_db_id(parent)
+            };
+
             // A. Register File
             let file_id_res = tx.query_row(
-                "INSERT INTO file_registry (abs_path, inode, mtime, size, is_dir) 
+                "INSERT INTO file_registry (abs_path, inode, mtime, size, is_dir)
                  VALUES (?1, ?2, ?3, 0, 0)
                  ON CONFLICT(abs_path) DO UPDATE SET inode=excluded.inode, mtime=excluded.mtime
                  RETURNING file_id",
