@@ -1017,8 +1017,8 @@ impl Filesystem for HollowDrive {
             None => { reply.error(libc::EINVAL); return; }
         };
 
-        // --- NEW: INBOX ATOMIC SAVE SUPPORT ---
-        // Allow renaming files strictly WITHIN the Inbox (e.g. .part -> .txt)
+        // --- PHASE 39: INBOX TO TAG SUPPORT ---
+        // Case A: Rename within inbox (atomic save: .part -> .txt)
         if parent == INODE_INBOX && newparent == INODE_INBOX {
              // 1. Get System Inbox Path from State
              let inbox_path = {
@@ -1027,7 +1027,6 @@ impl Filesystem for HollowDrive {
                  match lock.clone() {
                      Some(p) => p,
                      None => {
-                         // Should not happen if Phase 17 initialized correctly
                          reply.error(libc::ENOENT);
                          return;
                      }
@@ -1055,7 +1054,151 @@ impl Filesystem for HollowDrive {
              reply.ok();
              return;
         }
-        // --- END NEW LOGIC ---
+
+        // Case B: Move from Inbox to Tag (os.rename("/inbox/file.txt", "/tags/finance/file.txt"))
+        if parent == INODE_INBOX && InodeStore::is_persistent(newparent) {
+             // 1. Get source file from system inbox
+             let inbox_path = {
+                 let state_guard = self.state.read().unwrap();
+                 let lock = state_guard.system_inbox_path.lock().unwrap();
+                 match lock.clone() {
+                     Some(p) => p,
+                     None => {
+                         reply.error(libc::ENOENT);
+                         return;
+                     }
+                 }
+             };
+
+             let source_path = std::path::Path::new(&inbox_path).join(name_str);
+
+             // 2. Verify source exists
+             if !source_path.exists() {
+                 reply.error(libc::ENOENT);
+                 return;
+             }
+
+             // 3. Get destination tag ID
+             let dest_tag_id = InodeStore::inode_to_db_id(newparent);
+
+             // 4. Get file metadata
+             let metadata = match source_path.metadata() {
+                 Ok(m) => m,
+                 Err(e) => {
+                     tracing::error!("[HollowDrive] Failed to get metadata: {}", e);
+                     reply.error(libc::EIO);
+                     return;
+                 }
+             };
+
+             let physical_inode = metadata.ino();
+             let mtime = metadata.modified().unwrap_or(SystemTime::now())
+                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+             let size = metadata.len();
+
+             // 5. Get physical path for the file registry
+             // Use watch_dir[0]/_moved_from_inbox/<filename> as the physical location
+             let physical_path = {
+                 let state_guard = self.state.read().unwrap();
+                 let wp = state_guard.watch_paths.lock().unwrap();
+                 if wp.is_empty() {
+                     reply.error(libc::ENOSPC);
+                     return;
+                 }
+                 let base_dir = Path::new(&wp[0]);
+                 let moved_dir = base_dir.join("_moved_from_inbox");
+                 if !moved_dir.exists() {
+                     if let Err(e) = std::fs::create_dir_all(&moved_dir) {
+                         tracing::error!("[HollowDrive] Failed to create _moved_from_inbox: {}", e);
+                         reply.error(libc::EIO);
+                         return;
+                     }
+                 }
+                 moved_dir.join(name_str)
+             };
+
+             // 6. Move physical file to the persistent location
+             if let Err(e) = std::fs::rename(&source_path, &physical_path) {
+                 let err = match e.kind() {
+                     std::io::ErrorKind::NotFound => libc::ENOENT,
+                     std::io::ErrorKind::PermissionDenied => libc::EACCES,
+                     std::io::ErrorKind::AlreadyExists => libc::EEXIST,
+                     _ => libc::EIO,
+                 };
+                 tracing::error!("[HollowDrive] Failed to move file from inbox: {}", e);
+                 reply.error(err);
+                 return;
+             }
+
+             // 7. Register in database and tag it
+             let physical_path_str = physical_path.to_string_lossy().to_string();
+             let state_guard = self.state.read().unwrap();
+             let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+             if let Some(conn) = conn_lock.as_mut() {
+                 let tx = match conn.transaction() {
+                     Ok(t) => t,
+                     Err(_) => {
+                         // Try to undo the move
+                         let _ = std::fs::rename(&physical_path, &source_path);
+                         reply.error(libc::EIO);
+                         return;
+                     }
+                 };
+
+                 // Register file
+                 let file_id_res = tx.query_row(
+                     "INSERT INTO file_registry (abs_path, inode, mtime, size, is_dir)
+                      VALUES (?1, ?2, ?3, ?4, 0)
+                      ON CONFLICT(abs_path) DO UPDATE SET inode=excluded.inode, mtime=excluded.mtime
+                      RETURNING file_id",
+                     params![physical_path_str, physical_inode, mtime, size],
+                     |r| r.get::<_, u64>(0)
+                 );
+
+                 let file_id = match file_id_res {
+                     Ok(id) => id,
+                     Err(_) => {
+                         let _ = std::fs::rename(&physical_path, &source_path);
+                         reply.error(libc::EIO);
+                         return;
+                     }
+                 };
+
+                 // Link to destination tag
+                 if let Err(_) = tx.execute(
+                     "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
+                     params![file_id, dest_tag_id, newname_str]
+                 ) {
+                     // Ignore conflict
+                 }
+
+                 if let Err(_) = tx.commit() {
+                     let _ = std::fs::rename(&physical_path, &source_path);
+                     reply.error(libc::EIO);
+                     return;
+                 }
+             } else {
+                 let _ = std::fs::rename(&physical_path, &source_path);
+                 reply.error(libc::EIO);
+                 return;
+             }
+
+             tracing::info!("[HollowDrive] Moved file from inbox to tag (Tag ID {}): {} -> {}",
+                           dest_tag_id, name_str, newname_str);
+             reply.ok();
+             return;
+        }
+
+        // Case C: Move TO Inbox from Tag (os.rename("/tags/finance/file.txt", "/inbox/file.txt"))
+        if InodeStore::is_persistent(parent) && newparent == INODE_INBOX {
+             // This is the reverse operation - moving FROM tag back TO inbox
+             // For now, we'll block this as it's not part of Phase 39 requirements
+             // The tag view is persistent, inbox is "staging"
+             reply.error(libc::EXDEV);
+             return;
+        }
+        // --- END PHASE 39 LOGIC ---
 
         // Only support renaming within the Tag System (Existing Check)
         if !InodeStore::is_persistent(parent) || !InodeStore::is_persistent(newparent) {
