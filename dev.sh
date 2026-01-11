@@ -72,5 +72,14 @@ cargo build
 
 echo "🚀 Launching with Multi-Root: $WATCH_A, $WATCH_B"
 
-# FIX: Use sudo -E to preserve RUST_LOG
-sudo -E ./target/debug/magicfs "$MOUNT" "$WATCH_A,$WATCH_B"
+# Get current user ID/GID before elevating
+CURRENT_UID=$(id -u)
+CURRENT_GID=$(id -g)
+
+echo "🏹 Robin Hood Mode Configuration:"
+echo "   Daemon User : Root (via sudo)"
+echo "   Target User : UID $CURRENT_UID / GID $CURRENT_GID"
+
+# Launch with explicit identity variables
+# We use 'exec' to replace the shell process, ensuring signals propagate correctly
+exec sudo SUDO_UID=$CURRENT_UID SUDO_GID=$CURRENT_GID RUST_LOG=debug ./target/debug/magicfs "$MOUNT" "$WATCH_A,$WATCH_B"

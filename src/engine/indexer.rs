@@ -3,6 +3,7 @@ use crate::state::SharedState;
 use crate::error::{Result, MagicError};
 use crate::storage::Repository;
 use crate::engine::request_embedding_batch;
+use crate::core::inode_store::InodeStore;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::io;
@@ -52,8 +53,8 @@ impl Indexer {
 
             let repo = Repository::new(conn);
 
-            // Mock inode logic
-            let inode = file_path.len() as u64 + 0x100000;
+            // FIX: Use consistent hash_to_inode instead of file_path.len() + 0x100000
+            let inode = state_guard.inode_store.hash_to_inode(&file_path);
             let metadata = std::fs::metadata(&file_path).map_err(MagicError::Io)?;
             let mtime = metadata.modified().map_err(MagicError::Io)?.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
             let size = metadata.len();

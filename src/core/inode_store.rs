@@ -150,15 +150,18 @@ impl InodeStore {
     pub fn hash_to_inode(&self, key: &str) -> u64 {
         const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
         const FNV_PRIME: u64 = 0x100000001b3;
+        const SQLITE_MAX_INT: u64 = 0x7FFFFFFFFFFFFFFF; // 2^63-1
 
         let mut hash = FNV_OFFSET_BASIS;
         for byte in key.bytes() {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(FNV_PRIME);
         }
-        
+
         // Ensure it doesn't collide with reserved inodes or small counters
-        hash.saturating_add(100000)
+        // AND stays within SQLite INTEGER range (signed 64-bit)
+        let hash = hash.saturating_add(100000);
+        hash & SQLITE_MAX_INT
     }
 
     pub fn put_mirror_path(&self, inode: u64, path: String) {

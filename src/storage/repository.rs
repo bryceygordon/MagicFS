@@ -295,6 +295,9 @@ impl<'a> Repository<'a> {
 
     /// Moves a file from one tag to another (Retagging)
     pub fn move_file_between_tags(&mut self, file_id: u64, old_tag_id: u64, new_tag_id: u64, new_name: &str) -> Result<()> {
+        tracing::info!("[Repository] move_file_between_tags: file_id={}, old_tag_id={}, new_tag_id={}, new_name={}",
+                       file_id, old_tag_id, new_tag_id, new_name);
+
         let tx = self.conn.transaction()?;
         {
             // Check for name collision in destination
@@ -305,19 +308,23 @@ impl<'a> Repository<'a> {
             )?;
 
             if exists > 0 {
+                tracing::error!("[Repository] Name collision detected: tag_id={}, name={}", new_tag_id, new_name);
                 return Err(MagicError::State("File exists".into()));
             }
 
             // Remove old link
-            tx.execute("DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2", params![file_id, old_tag_id])?;
+            let deleted = tx.execute("DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2", params![file_id, old_tag_id])?;
+            tracing::info!("[Repository] Deleted {} old file_tags entries", deleted);
 
             // Create new link
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
                 params![file_id, new_tag_id, new_name]
             )?;
+            tracing::info!("[Repository] Inserted {} new file_tags entry", inserted);
         }
         tx.commit()?;
+        tracing::info!("[Repository] Transaction committed successfully");
         Ok(())
     }
 
