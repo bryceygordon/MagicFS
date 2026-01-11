@@ -2051,6 +2051,42 @@ impl Filesystem for HollowDrive {
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEmpty) {
+        // --- PHASE 40 FIX: ALLOW INBOX DELETION ---
+        if parent == INODE_INBOX {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => { reply.error(libc::EINVAL); return; }
+            };
+
+            // 1. Resolve Physical Path (with correct scope management)
+            let inbox_path = {
+                let state_guard = self.state.read().unwrap();
+                let lock = state_guard.system_inbox_path.lock().unwrap();
+                lock.clone()
+            };
+
+            if let Some(root) = inbox_path {
+                let physical_path = std::path::Path::new(&root).join(name_str);
+
+                // 2. Delete Physical File (Daemon is Root, so this works)
+                if let Err(e) = std::fs::remove_file(&physical_path) {
+                    tracing::error!("[HollowDrive] Failed to delete physical file {}: {}", physical_path.display(), e);
+                    reply.error(libc::EACCES);
+                    return;
+                }
+
+                // 3. Clean up Database (Best Effort)
+                // The Watcher will handle this via the DELETE event
+                tracing::info!("[HollowDrive] Physical delete successful. Watcher will clean DB: {}", name_str);
+
+                reply.ok();
+                return;
+            }
+            reply.error(libc::ENOENT);
+            return;
+        }
+        // ------------------------------------------
+
         // 1. Check Context: Must be a Persistent Tag
         if !InodeStore::is_persistent(parent) {
             // /search and /mirror are Read-Only for deletion
