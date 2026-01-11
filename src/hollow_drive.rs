@@ -1078,10 +1078,7 @@ impl Filesystem for HollowDrive {
                  return;
              }
 
-             // 3. Get destination tag ID
-             let dest_tag_id = InodeStore::inode_to_db_id(newparent);
-
-             // 4. Get file metadata
+             // 3. Get file metadata
              let metadata = match source_path.metadata() {
                  Ok(m) => m,
                  Err(e) => {
@@ -1096,7 +1093,7 @@ impl Filesystem for HollowDrive {
                  .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
              let size = metadata.len();
 
-             // 5. Get physical path for the file registry
+             // 4. Get physical path for the file registry
              // Use watch_dir[0]/_moved_from_inbox/<filename> as the physical location
              let physical_path = {
                  let state_guard = self.state.read().unwrap();
@@ -1117,7 +1114,7 @@ impl Filesystem for HollowDrive {
                  moved_dir.join(name_str)
              };
 
-             // 6. Move physical file to the persistent location
+             // 5. Move physical file to the persistent location
              if let Err(e) = std::fs::rename(&source_path, &physical_path) {
                  let err = match e.kind() {
                      std::io::ErrorKind::NotFound => libc::ENOENT,
@@ -1130,8 +1127,11 @@ impl Filesystem for HollowDrive {
                  return;
              }
 
-             // 7. Register in database and tag it
-             let physical_path_str = physical_path.to_string_lossy().to_string();
+             // 7. Update DB (FIXED: UPDATE existing entry to preserve inode lookup integrity)
+             let old_path_str = source_path.to_string_lossy().to_string();
+             let new_path_str = physical_path.to_string_lossy().to_string();
+             let dest_tag_id = InodeStore::inode_to_db_id(newparent);
+
              let state_guard = self.state.read().unwrap();
              let mut conn_lock = state_guard.db_connection.lock().unwrap();
 
@@ -1146,31 +1146,43 @@ impl Filesystem for HollowDrive {
                      }
                  };
 
-                 // Register file
-                 let file_id_res = tx.query_row(
-                     "INSERT INTO file_registry (abs_path, inode, mtime, size, is_dir)
-                      VALUES (?1, ?2, ?3, ?4, 0)
-                      ON CONFLICT(abs_path) DO UPDATE SET inode=excluded.inode, mtime=excluded.mtime
-                      RETURNING file_id",
-                     params![physical_path_str, physical_inode, mtime, size],
-                     |r| r.get::<_, u64>(0)
-                 );
+                 // 1. Try to UPDATE existing record first (preserves file_id for inode lookup)
+                 let updated = tx.execute(
+                     "UPDATE file_registry SET abs_path = ?1, inode = ?2, mtime = ?3, size = ?4 WHERE abs_path = ?5",
+                     params![new_path_str, physical_inode, mtime, size, old_path_str]
+                 ).unwrap_or(0);
 
-                 let file_id = match file_id_res {
-                     Ok(id) => id,
-                     Err(_) => {
-                         let _ = std::fs::rename(&physical_path, &source_path);
-                         reply.error(libc::EIO);
-                         return;
-                     }
+                 let file_id = if updated > 0 {
+                     // Fetch the ID of the updated record
+                     tx.query_row(
+                         "SELECT file_id FROM file_registry WHERE abs_path = ?1",
+                         params![new_path_str],
+                         |r| r.get::<_, u64>(0)
+                     ).unwrap_or(0)
+                 } else {
+                     // 2. If no record existed (edge case), INSERT new one
+                     tx.query_row(
+                         "INSERT INTO file_registry (abs_path, inode, mtime, size, is_dir)
+                          VALUES (?1, ?2, ?3, ?4, 0)
+                          ON CONFLICT(abs_path) DO UPDATE SET inode=excluded.inode, mtime=excluded.mtime
+                          RETURNING file_id",
+                         params![new_path_str, physical_inode, mtime, size],
+                         |r| r.get::<_, u64>(0)
+                     ).unwrap_or(0)
                  };
 
-                 // Link to destination tag
-                 if let Err(_) = tx.execute(
-                     "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
-                     params![file_id, dest_tag_id, newname_str]
-                 ) {
-                     // Ignore conflict
+                 if file_id > 0 {
+                     // 3. Link to destination tag (use INSERT OR REPLACE)
+                     let _ = tx.execute(
+                         "INSERT OR REPLACE INTO file_tags (file_id, tag_id, display_name) VALUES (?1, ?2, ?3)",
+                         params![file_id, dest_tag_id, newname_str]
+                     );
+
+                     // 4. Cleanup old Inbox tag (Tag ID 1) if it exists
+                     let _ = tx.execute(
+                         "DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = 1",
+                         params![file_id]
+                     );
                  }
 
                  if let Err(_) = tx.commit() {
