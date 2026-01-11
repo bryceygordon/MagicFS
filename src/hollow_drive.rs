@@ -496,19 +496,20 @@ impl Filesystem for HollowDrive {
                     // Attempt 1: Exact Match
                     tracing::info!("[HollowDrive] LOOKUP tag_id={}, name_str={}", tag_id, name_str);
                     let sql_exact = "
-                        SELECT f.inode, f.size, f.mtime, f.is_dir
+                        SELECT f.inode, f.size, f.mtime, f.is_dir, f.abs_path
                         FROM file_tags ft
                         JOIN file_registry f ON ft.file_id = f.file_id
                         WHERE ft.tag_id = ?1 AND ft.display_name = ?2
                     ";
-                    
+
                     if let Ok(mut stmt) = conn.prepare(sql_exact) {
                         let rows_res = stmt.query_map(params![tag_id, name_str], |row| {
                             Ok((
-                                row.get::<_, u64>(0)?, 
-                                row.get::<_, u64>(1)?, 
-                                row.get::<_, u64>(2)?, 
-                                row.get::<_, i32>(3)?
+                                row.get::<_, u64>(0)?,
+                                row.get::<_, u64>(1)?,
+                                row.get::<_, u64>(2)?,
+                                row.get::<_, i32>(3)?,
+                                row.get::<_, String>(4)?
                             ))
                         });
 
@@ -516,6 +517,10 @@ impl Filesystem for HollowDrive {
                             if let Some(Ok(row)) = rows.next() {
                                 target_inode = Some(row.0);
                                 target_meta = Some((row.1, row.2, row.3));
+
+                                // CRITICAL FIX: Populate mirror_path cache for getattr()
+                                let abs_path = row.4.clone();
+                                state_guard.inode_store.put_mirror_path(row.0, abs_path);
                             }
                         }
                     }
@@ -525,20 +530,21 @@ impl Filesystem for HollowDrive {
                         if let Some((base_name, index)) = Self::parse_virtual_name(name_str) {
                              // Fetch ALL duplicates for base_name, sorted deterministically (by file_id)
                              let sql_alias = "
-                                SELECT f.inode, f.size, f.mtime, f.is_dir 
-                                FROM file_tags ft 
-                                JOIN file_registry f ON ft.file_id = f.file_id 
+                                SELECT f.inode, f.size, f.mtime, f.is_dir, f.abs_path
+                                FROM file_tags ft
+                                JOIN file_registry f ON ft.file_id = f.file_id
                                 WHERE ft.tag_id = ?1 AND ft.display_name = ?2
                                 ORDER BY f.file_id ASC
                              ";
-                             
+
                              if let Ok(mut stmt) = conn.prepare(sql_alias) {
                                  let rows_res = stmt.query_map(params![tag_id, base_name], |row| {
                                      Ok((
-                                         row.get::<_, u64>(0)?, 
-                                         row.get::<_, u64>(1)?, 
-                                         row.get::<_, u64>(2)?, 
-                                         row.get::<_, i32>(3)?
+                                         row.get::<_, u64>(0)?,
+                                         row.get::<_, u64>(1)?,
+                                         row.get::<_, u64>(2)?,
+                                         row.get::<_, i32>(3)?,
+                                         row.get::<_, String>(4)?
                                      ))
                                  });
 
@@ -549,6 +555,9 @@ impl Filesystem for HollowDrive {
                                              if let Ok(r) = row {
                                                  target_inode = Some(r.0);
                                                  target_meta = Some((r.1, r.2, r.3));
+
+                                                 // CRITICAL FIX: Populate mirror_path cache for virtual aliases too
+                                                 state_guard.inode_store.put_mirror_path(r.0, r.4);
                                              }
                                              break;
                                          }

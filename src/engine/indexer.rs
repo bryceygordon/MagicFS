@@ -3,7 +3,6 @@ use crate::state::SharedState;
 use crate::error::{Result, MagicError};
 use crate::storage::Repository;
 use crate::engine::request_embedding_batch;
-use crate::core::inode_store::InodeStore;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::io;
