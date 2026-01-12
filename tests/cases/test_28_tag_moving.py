@@ -1,4 +1,3 @@
-# FILE: tests/cases/test_28_tag_moving.py
 from common import MagicTest
 import os
 import sys
@@ -79,7 +78,7 @@ time.sleep(0.5)
 
 print("[Action] Attempting to create circular dependency (c -> a)...")
 src = os.path.join(test.mount_point, "tags", "a", "c")  # This doesn't exist yet
-dst = os.path.join(test.mount_point, "tags", "c")      # This exists
+dst = os.path.join(test.mount_point, "tags", "c")       # This exists
 
 try:
     # Try to move 'a' into 'c' which is its own descendant
@@ -97,24 +96,29 @@ except Exception as e:
 # 7. Test moving file between tags (should still work)
 print("[Setup] Creating file in 'fin_proj'...")
 
+# --- FIX: Create REAL file to satisfy Lazy Reaper ---
+real_filename = "real_doc.txt"
+test.create_file(real_filename, "I exist therefore I am.")
+real_path = os.path.join(test.watch_dir, real_filename)
+
 # Step 7.1: Clean any existing conflicting data first using safe helper
 clean_statements = [
-    "DELETE FROM file_tags WHERE file_id IN (SELECT file_id FROM file_registry WHERE abs_path IN ('/fake/doc.txt', '/fake_doc_moved.txt'))",
-    "DELETE FROM file_registry WHERE abs_path IN ('/fake/doc.txt', '/fake_doc_moved.txt')"
+    f"DELETE FROM file_tags WHERE file_id IN (SELECT file_id FROM file_registry WHERE abs_path = '{real_path}')",
+    f"DELETE FROM file_registry WHERE abs_path = '{real_path}'"
 ]
-test.run_sql_transaction(clean_statements)  # Ignore return, it's ok if no rows exist
+test.run_sql_transaction(clean_statements) 
 
-# Step 7.2: Insert file_registry and get the actual file_id
+# Step 7.2: Insert file_registry with REAL PATH
 print("  Creating file_registry entry...")
 insert_result = test.safe_sqlite_execute(
-    "INSERT INTO file_registry (abs_path, inode, mtime, size) VALUES ('/fake/doc.txt', 888, 1234567890, 50)"
+    f"INSERT INTO file_registry (abs_path, inode, mtime, size) VALUES ('{real_path}', 888, 1234567890, 50)"
 )
 if not insert_result:
     print("❌ FAILURE: Failed to create file_registry entry")
     sys.exit(1)
 
 # Get the file_id
-results = test.safe_sqlite_query("SELECT file_id FROM file_registry WHERE abs_path = '/fake/doc.txt'")
+results = test.safe_sqlite_query(f"SELECT file_id FROM file_registry WHERE abs_path = '{real_path}'")
 if not results:
     print("❌ FAILURE: No file_id returned from insert")
     sys.exit(1)
@@ -122,6 +126,7 @@ file_id = results[0][0]
 print(f"  Created file_registry entry with file_id: {file_id}")
 
 # Step 7.3: Create file_tags entry using the actual file_id
+# Note: We name it 'doc.txt' virtually, even though real file is 'real_doc.txt'
 link_result = test.safe_sqlite_execute(
     "INSERT INTO file_tags (file_id, tag_id, display_name) VALUES (?, (SELECT tag_id FROM tags WHERE name='fin_proj'), 'doc.txt')",
     (file_id,)
@@ -132,12 +137,12 @@ if not link_result:
 print(f"  Linked file_id {file_id} to tag 'fin_proj'")
 
 # Step 7.4: Verify the database state
-verify_results = test.safe_sqlite_query("""
+verify_results = test.safe_sqlite_query(f"""
     SELECT t.name, ft.display_name, fr.abs_path
     FROM file_tags ft
     JOIN tags t ON ft.tag_id = t.tag_id
     JOIN file_registry fr ON ft.file_id = fr.file_id
-    WHERE fr.abs_path = '/fake/doc.txt'
+    WHERE fr.abs_path = '{real_path}'
 """)
 if verify_results:
     print(f"  Database verification:")
@@ -156,15 +161,7 @@ try:
     print(f"  Directory listing: {listing}")
     if "doc.txt" not in listing:
         print(f"❌ FAILURE: 'doc.txt' not found in directory listing!")
-        # Debug: List what IS there
         print(f"  Full directory contents: {listing}")
-
-        # Debug: Check if directory exists at all
-        if os.path.exists(file_dir):
-            print(f"  Directory exists: Yes")
-        else:
-            print(f"  Directory exists: No")
-
         sys.exit(1)
     print("✅ File visible in directory")
 except Exception as e:

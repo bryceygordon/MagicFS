@@ -1032,41 +1032,69 @@ impl Filesystem for HollowDrive {
                  }
 
                  // Second: Add files from this tag
+                 // PHASE 41: The Lazy Reaper - Fetch path and file_id for existence check
                  let sql = "
-                    SELECT f.inode, f.is_dir, ft.display_name
+                    SELECT f.inode, f.is_dir, ft.display_name, f.abs_path, f.file_id
                     FROM file_tags ft
                     JOIN file_registry f ON ft.file_id = f.file_id
                     WHERE ft.tag_id = ?1
                     ORDER BY f.file_id ASC
                  ";
-                 if let Ok(mut stmt) = conn.prepare(sql) {
-                     if let Ok(rows) = stmt.query_map(params![tag_id], |row| {
-                         Ok((
-                             row.get::<_, u64>(0)?,
-                             row.get::<_, i32>(1)?,
-                             row.get::<_, String>(2)?
-                         ))
-                     }) {
-                         // COLLISION RESOLUTION: Count Names
-                         let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-                         for row in rows {
-                             if let Ok((inode, is_dir, name)) = row {
-                                 let count = name_counts.entry(name.clone()).or_insert(0);
-                                 *count += 1;
+                 // Store IDs of ghost files to reap after iteration
+                 let mut ghosts: Vec<u64> = Vec::new();
 
-                                 let final_name = if *count > 1 {
-                                     format!("{} ({})", name, count)
-                                 } else {
-                                     name
-                                 };
+                 // Scope the query execution so 'stmt' is dropped before we use 'conn' for deletion
+                 {
+                     if let Ok(mut stmt) = conn.prepare(sql) {
+                         if let Ok(rows) = stmt.query_map(params![tag_id], |row| {
+                             Ok((
+                                 row.get::<_, u64>(0)?,   // inode
+                                 row.get::<_, i32>(1)?,   // is_dir
+                                 row.get::<_, String>(2)?, // display_name
+                                 row.get::<_, String>(3)?, // abs_path
+                                 row.get::<_, u64>(4)?,   // file_id
+                             ))
+                         }) {
+                             // COLLISION RESOLUTION: Count Names
+                             let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-                                 let kind = if is_dir != 0 { FileType::Directory } else { FileType::RegularFile };
-                                 items.push((inode, kind, final_name));
+                             for row in rows {
+                                 if let Ok((inode, is_dir, name, abs_path, file_id)) = row {
+                                     // PHASE 41: Verify Physical Existence
+                                     if !std::path::Path::new(&abs_path).exists() {
+                                         tracing::warn!("[LazyReaper] Ghost detected: '{}' (ID: {}). Marking for deletion.", abs_path, file_id);
+                                         ghosts.push(file_id);
+                                         continue; // Skip adding to items
+                                     }
+
+                                     let count = name_counts.entry(name.clone()).or_insert(0);
+                                     *count += 1;
+
+                                     let final_name = if *count > 1 {
+                                         format!("{} ({})", name, count)
+                                     } else {
+                                         name
+                                     };
+
+                                     let kind = if is_dir != 0 { FileType::Directory } else { FileType::RegularFile };
+                                     items.push((inode, kind, final_name));
+                                 }
                              }
+                         } else {
+                             tracing::error!("DB Error querying file tags");
                          }
-                     } else {
-                         tracing::error!("DB Error querying file tags");
+                     }
+                 } // stmt dropped here
+
+                 // PHASE 41: Reap the Ghosts
+                 if !ghosts.is_empty() {
+                     tracing::info!("[LazyReaper] Purging {} ghost records...", ghosts.len());
+                     let repo = Repository::new(conn);
+                     for file_id in ghosts {
+                         if let Err(e) = repo.delete_file_by_id(file_id) {
+                             tracing::error!("[LazyReaper] Failed to purge ghost ID {}: {}", file_id, e);
+                         }
                      }
                  }
              }
