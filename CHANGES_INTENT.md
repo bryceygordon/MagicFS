@@ -1,20 +1,18 @@
-# Phase 41: The Lazy Reaper (Self-Healing Views)
+# Phase 41: The Lazy Reaper (Completed)
+
+## Status: ✅ Complete
 
 ## Objective
 Implement "Verify at the Point of View" logic to automatically purge non-existent files ("Ghosts") from the database when they are accessed or listed.
 
-## Problem
-Database entries occasionally persist after physical files are deleted (e.g., race conditions, missed watcher events, or transient files like `.part` that vanished). This causes `ls` to show files that cannot be read.
-
-## Solution
-Modify `HollowDrive::readdir()` (specifically for Tag Views) to:
-1.  Iterate through the candidate files returned by the database.
-2.  Perform a physical existence check (`std::path::Path::new(&path).exists()`) for each.
-3.  **If the file is missing:**
-    * Exclude it from the FUSE directory listing (it vanishes instantly).
-    * Add its `file_id` to a `ghosts` list.
-    * After the query iteration finishes, execute `Repository::delete_file_by_id` for all detected ghosts to permanently clean the database.
+## Changes Delivered
+1.  **HollowDrive Update:** `readdir` now performs `std::path::Path::exists()` checks on all candidate files.
+2.  **Auto-Purge:** Files failing the check are excluded from the listing and immediately deleted from `file_registry` and `file_tags` via `Repository`.
+3.  **Test Suite Hardening:**
+    * `test_42_lazy_reaper.py`: New test verifying ghost detection and cleanup.
+    * `test_28_tag_moving.py`: Updated to use real files (mocking with non-existent paths triggers the Reaper).
+    * `test_32_broken_links.py`: Fixed race condition in daemon restart logic.
+    * Removed `pytest` dependencies from recent tests.
 
 ## Verification
-* **Test:** `tests/cases/test_42_lazy_reaper.py` (Current status: Failing ❌)
-* **Expected:** `ls` should not show `phantom_file.txt`, and subsequent DB checks should show 0 records.
+All tests passed, including the new regression suite for the Reaper logic.

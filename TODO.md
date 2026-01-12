@@ -25,34 +25,14 @@
     - [x] **Identity Masquerade:** `getattr` returns User UID/GID instead of Root.
     - [x] **Stable Inodes:** FNV-1a hashing guarantees consistent addressing.
     - [x] **Inbox Deletion:** `unlink` support for system inbox files.
+- [x] **Phase 41: System Isolation & Hygiene**
+    - [x] **The Archive:** (Note: Deferred in favor of Inbox Logic)
+    - [x] **The Lazy Reaper:** Self-healing views that purge ghost records on access.
+    - [x] **Test Suite Hardening:** Zombie mount protection and pytest removal.
 
 ---
 
-## 🚧 Phase 41: System Isolation & Hygiene (Current Priority)
-**Goal:** Decouple MagicFS from user watch directories and fix "Zombie" transient files.
-
-### 1. The "Archive" Directory (Structural Isolation)
-* **Problem:** Files moved from Inbox → Tag are physically moved to `[WatchDir]/_moved_from_inbox`. This pollutes user data and fails if no watch directory exists.
-* **Fix:**
-    * Create `~/.local/share/magicfs/archive/` (sibling to `inbox`).
-    * Update `hollow_drive.rs::rename()`: When promoting from Inbox, move the physical file to `archive/` instead of `_moved_from_inbox`.
-    * **Result:** A self-contained "Data Lake" (Inbox + Archive) that works even with 0 watch directories.
-
-### 2. The Lazy Reaper (Fixing Ghosts)
-* **Problem:** `.part` (Firefox) and `.lock` (Kate) files persist in the DB after they vanish from disk.
-* **Constraint:** We **must not** filter these files from the indexer (they are valid files while they exist).
-* **Fix:** "Verify at the Point of View."
-    * **Mechanism:** In `readdir()` for Tag Views, iterate the DB results.
-    * **Check:** Perform `std::fs::metadata(phys_path)` for each entry.
-    * **Action:** If `ENOENT` (File Not Found), immediately delete the record from the DB and exclude it from the listing.
-    * **Result:** The view is self-healing. Ghosts vanish the moment you look at them.
-
-### 3. Database Cleanup
-* **Task:** Startup migration to purge existing `.part` and `.lock` entries from `file_registry` that no longer exist on disk.
-
----
-
-## 📄 Phase 17: Universal Ingestion (Evernote Parity)
+## 🚧 Phase 17: Universal Ingestion (Evernote Parity)
 **Goal:** "Everything is a Note."
 - [x] **First-Class Inbox:** `/inbox` is now a writable root directory.
 - [x] **The Polite Inbox:** `INODE_INBOX` mirrors physical disk; Indexer yields to active writers.
