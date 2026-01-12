@@ -1,5 +1,5 @@
 #!/bin/bash
-# FILE: dev.sh
+# FILE: dev_single.sh
 set -e
 
 # --- Config ---
@@ -25,14 +25,14 @@ echo "☢️  Cleanup Sequence Initiated..."
 # 1. Kill processes
 sudo pkill -x magicfs || true
 
-# 2. Unmount Loop
-if mountpoint -q "$MOUNT" 2>/dev/null || grep -qs "$MOUNT" /proc/mounts; then
+# 2. Unmount Loop (ROBUST VERIFICATION)
+if grep -qs "$MOUNT" /proc/mounts; then
     echo "    🔻 Unmounting..."
     sudo umount -l "$MOUNT"
     
-    MAX_RETRIES=10
+    MAX_RETRIES=20
     COUNT=0
-    while mountpoint -q "$MOUNT" 2>/dev/null; do
+    while grep -qs "$MOUNT" /proc/mounts; do
         sleep 0.2
         ((COUNT++))
         if [ $COUNT -ge $MAX_RETRIES ]; then
@@ -70,5 +70,9 @@ cargo build
 
 echo "🚀 Launching with Single Root: $WATCH_DIR"
 
-# FIX: Use sudo -E to preserve RUST_LOG
-sudo -E ./target/debug/magicfs "$MOUNT" "$WATCH_DIR"
+# Get current user ID/GID before elevating
+CURRENT_UID=$(id -u)
+CURRENT_GID=$(id -g)
+
+# Launch with explicit identity variables
+exec sudo SUDO_UID=$CURRENT_UID SUDO_GID=$CURRENT_GID RUST_LOG=debug ./target/debug/magicfs "$MOUNT" "$WATCH_DIR"

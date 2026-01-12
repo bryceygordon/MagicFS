@@ -26,21 +26,31 @@ echo "☢️  Cleanup Sequence Initiated..."
 # 1. Kill processes
 sudo pkill -x magicfs || true
 
-# 2. Unmount Loop
-if mountpoint -q "$MOUNT" 2>/dev/null || grep -qs "$MOUNT" /proc/mounts; then
+# 2. Unmount Loop (ROBUST VERIFICATION)
+# We check /proc/mounts because 'mountpoint' can lie during lazy unmounts
+if grep -qs "$MOUNT" /proc/mounts; then
     echo "    🔻 Unmounting..."
     sudo umount -l "$MOUNT"
     
-    MAX_RETRIES=10
+    MAX_RETRIES=20
     COUNT=0
-    while mountpoint -q "$MOUNT" 2>/dev/null; do
+    # Wait until it is GONE from the kernel table
+    while grep -qs "$MOUNT" /proc/mounts; do
         sleep 0.2
         ((COUNT++))
         if [ $COUNT -ge $MAX_RETRIES ]; then
-            echo "    ❌ Timeout waiting for unmount."
-            exit 1
+            echo "    ❌ CRITICAL: Kernel refuses to release mount. Trying forced kill..."
+            sudo fuser -km "$MOUNT" 2>/dev/null || true
+            sudo umount -f "$MOUNT" 2>/dev/null || true
+            break
         fi
     done
+fi
+
+# Double check to prevent stacking
+if grep -qs "$MOUNT" /proc/mounts; then
+    echo "❌ FATAL: Mount point is still busy. Please reboot or check 'lsof $MOUNT'."
+    exit 1
 fi
 
 # 3. Delete mount directory
