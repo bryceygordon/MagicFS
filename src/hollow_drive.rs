@@ -23,6 +23,7 @@ const INODE_REFRESH: u64 = 4;
 const INODE_MIRROR: u64 = 5;
 const INODE_TAGS: u64 = 6;
 const INODE_INBOX: u64 = 7;
+const INODE_ALL_FILES: u64 = 8; // Phase 44: All Files View
 
 pub struct HollowDrive {
     pub state: SharedState,
@@ -85,7 +86,7 @@ impl HollowDrive {
             }
         }
         
-        // 3. Persistent Files (Tag View)
+        // 3. Persistent Files (Tag View & All Files)
         let mut conn_lock = state_guard.db_connection.lock().ok()?;
         if let Some(conn) = conn_lock.as_mut() {
              let mut stmt = conn.prepare("SELECT abs_path FROM file_registry WHERE inode = ?1").ok()?;
@@ -161,44 +162,44 @@ impl Filesystem for HollowDrive {
         // 1. Root Directory
         if parent == INODE_ROOT {
             tracing::debug!("[lookup] Root lookup for name: '{}'", name_str);
+            let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
+            
             match name_str {
                 "." | ".." => {
                     let mut attr = mk_attr(INODE_ROOT, fuser::FileType::Directory, 0o755);
-                    let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
                     attr.uid = identity.uid; attr.gid = identity.gid;
                     reply.entry(&ttl, &attr, 0);
                 },
                 ".magic" => {
                     let mut attr = mk_attr(INODE_MAGIC, fuser::FileType::Directory, 0o755);
-                    let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
                     attr.uid = identity.uid; attr.gid = identity.gid;
                     reply.entry(&ttl, &attr, 0);
                 },
                 "search" => {
                     let mut attr = mk_attr(INODE_SEARCH, fuser::FileType::Directory, 0o555);
-                    let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
                     attr.uid = identity.uid; attr.gid = identity.gid;
                     reply.entry(&ttl, &attr, 0);
                 },
                 "mirror" => {
                     let mut attr = mk_attr(INODE_MIRROR, fuser::FileType::Directory, 0o755);
-                    let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
                     attr.uid = identity.uid; attr.gid = identity.gid;
                     reply.entry(&ttl, &attr, 0);
                 },
                 "inbox" => {
-                    tracing::debug!("[lookup] Returning INODE_INBOX (7) for 'inbox'");
                     let mut attr = mk_attr(INODE_INBOX, fuser::FileType::Directory, 0o755);
-                    let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
                     attr.uid = identity.uid; attr.gid = identity.gid;
                     reply.entry(&ttl, &attr, 0);
                 },
                 "tags" => {
                     let mut attr = mk_attr(INODE_TAGS, fuser::FileType::Directory, 0o755);
-                    let identity = { let state_guard = self.state.read().unwrap(); *state_guard.identity };
                     attr.uid = identity.uid; attr.gid = identity.gid;
                     reply.entry(&ttl, &attr, 0);
                 },
+                "all_files" => { // Phase 44
+                    let mut attr = mk_attr(INODE_ALL_FILES, fuser::FileType::Directory, 0o555); // Read-only view
+                    attr.uid = identity.uid; attr.gid = identity.gid;
+                    reply.entry(&ttl, &attr, 0);
+                }
                 _ => reply.error(libc::ENOENT),
             }
             return;
@@ -701,6 +702,10 @@ impl Filesystem for HollowDrive {
                 ino: INODE_REFRESH, size: 0, blocks: 0, atime: ts, mtime: ts, ctime: ts, crtime: ts,
                 kind: FileType::RegularFile, perm: 0o666, nlink: 1, uid: 0, gid: 0, rdev: 0, flags: 0, blksize: 512,
             },
+            INODE_ALL_FILES => fuser::FileAttr {
+                ino: INODE_ALL_FILES, size: 0, blocks: 0, atime: ts, mtime: ts, ctime: ts, crtime: ts,
+                kind: FileType::Directory, perm: 0o555, nlink: 2, uid: 0, gid: 0, rdev: 0, flags: 0, blksize: 512,
+            },
             _ => {
                 if InodeStore::is_persistent(inode) {
                     // Persistent Tag (e.g. /tags/finance)
@@ -833,6 +838,7 @@ impl Filesystem for HollowDrive {
                 (INODE_TAGS, FileType::Directory, "tags".to_string()),
                 (INODE_SEARCH, FileType::Directory, "search".to_string()),
                 (INODE_MIRROR, FileType::Directory, "mirror".to_string()),
+                (INODE_ALL_FILES, FileType::Directory, "all_files".to_string()), // Phase 44: All Files View
                 (INODE_MAGIC, FileType::Directory, ".magic".to_string()),
             ]);
             for (i, (ino, kind, name)) in root_entries.iter().enumerate().skip(offset as usize) {
@@ -878,6 +884,68 @@ impl Filesystem for HollowDrive {
                     }
                 }
             }
+            for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
+                if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
+            }
+            reply.ok();
+            return;
+        }
+
+        // Phase 44: All Files View (with Lazy Reaper)
+        if ino == INODE_ALL_FILES {
+            let mut items = entries.clone();
+            let state_guard = self.state.read().unwrap();
+            let mut conn_lock = state_guard.db_connection.lock().unwrap();
+
+            // Store IDs of ghost files to reap
+            let mut ghosts: Vec<u64> = Vec::new();
+
+            if let Some(conn) = conn_lock.as_mut() {
+                let sql = "SELECT inode, is_dir, abs_path, file_id FROM file_registry";
+                {
+                    if let Ok(mut stmt) = conn.prepare(sql) {
+                        let rows = stmt.query_map([], |row| {
+                            Ok((
+                                row.get::<_, u64>(0)?,
+                                row.get::<_, i32>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, u64>(3)?
+                            ))
+                        });
+                        
+                        if let Ok(itr) = rows {
+                            for row in itr {
+                                if let Ok((inode, is_dir, abs_path, file_id)) = row {
+                                    // LAZY REAPER CHECK
+                                    if !std::path::Path::new(&abs_path).exists() { 
+                                        tracing::warn!("[LazyReaper] Ghost detected in all_files: '{}' (ID: {}). Marking for deletion.", abs_path, file_id);
+                                        ghosts.push(file_id);
+                                        continue; 
+                                    }
+
+                                    let name = std::path::Path::new(&abs_path)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "unknown".to_string());
+
+                                    let kind = if is_dir != 0 { FileType::Directory } else { FileType::RegularFile };
+                                    items.push((inode, kind, name));
+                                }
+                            }
+                        }
+                    }
+                } // stmt dropped here
+
+                // Reap the Ghosts
+                if !ghosts.is_empty() {
+                    tracing::info!("[LazyReaper] Purging {} ghost records from all_files...", ghosts.len());
+                    let repo = Repository::new(conn);
+                    for file_id in ghosts {
+                        let _ = repo.delete_file_by_id(file_id);
+                    }
+                }
+            }
+
             for (i, (ino, kind, name)) in items.iter().enumerate().skip(offset as usize) {
                 if reply.add(*ino, (i+1) as i64, *kind, name) { break; }
             }
@@ -1526,7 +1594,7 @@ impl Filesystem for HollowDrive {
              }
 
              tracing::info!("[HollowDrive] Moved file from inbox to tag (Tag ID {}): {} -> {}",
-                           dest_tag_id, name_str, newname_str);
+                            dest_tag_id, name_str, newname_str);
              reply.ok();
              return;
         }
@@ -2078,7 +2146,7 @@ impl Filesystem for HollowDrive {
         }
     }
 
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEmpty) {
+fn unlink(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEmpty) {
         // --- PHASE 40 FIX: ALLOW INBOX DELETION ---
         if parent == INODE_INBOX {
             let name_str = match name.to_str() {
@@ -2137,7 +2205,7 @@ impl Filesystem for HollowDrive {
             // Strategy: Try exact match first, then virtual alias resolution
             let mut target_file_id = None;
 
-            // Attempt 1: Exact Match
+            // Attempt 1: Exact Match (Scope repo to drop borrow)
             {
                 let repo = Repository::new(conn);
                 if let Ok(Some(file_id)) = repo.get_file_id_in_tag(tag_id, name_str) {
@@ -2182,14 +2250,67 @@ impl Filesystem for HollowDrive {
                 }
             };
 
-            // 3. Execute Soft Delete
-            let repo = Repository::new(conn);
-            match repo.unlink_file(tag_id, file_id) {
-                Ok(_) => reply.ok(),
-                Err(MagicError::State(_)) => reply.error(libc::ENOENT),
-                Err(e) => {
-                    tracing::error!("[HollowDrive] Unlink failed: {}", e);
-                    reply.error(libc::EIO);
+            // 3. Phase 44: Immediate Trash Logic (Soft vs Hard Delete)
+            
+            // FIX: Get trash_tag_id in a separate scope to avoid long borrow
+            let trash_tag_id = {
+                let repo = Repository::new(conn);
+                repo.get_tag_id_by_name("trash", None).unwrap_or(None).unwrap_or(0)
+            };
+
+            if tag_id == trash_tag_id {
+                // HARD DELETE (Incinerate)
+                // This removes physical file + registry + tags
+                tracing::info!("[HollowDrive] Hard deleting file_id={} from trash", file_id);
+                
+                // FIX: Perform query on 'conn' BEFORE creating 'repo'
+                // We need to get physical path first to delete it
+                let abs_path: Option<String> = conn.query_row(
+                    "SELECT abs_path FROM file_registry WHERE file_id = ?1",
+                    params![file_id],
+                    |r| r.get(0)
+                ).ok();
+
+                if let Some(path) = abs_path {
+                    let _ = std::fs::remove_file(path); // Best effort physical delete
+                }
+
+                // NOW create repo for deletion
+                let repo = Repository::new(conn);
+                match repo.delete_file_by_id(file_id) {
+                    Ok(_) => reply.ok(),
+                    Err(_) => reply.error(libc::EIO),
+                }
+            } else {
+                // SOFT DELETE (Move to Trash)
+                tracing::info!("[HollowDrive] Soft deleting file_id={} (Move to Trash)", file_id);
+                
+                // Declare repo as mutable for the move operation
+                let mut repo = Repository::new(conn);
+                
+                let trash_id = if trash_tag_id == 0 {
+                     // Create trash if missing
+                     repo.create_tag("trash", None).unwrap_or(0)
+                } else {
+                     trash_tag_id
+                };
+
+                if trash_id > 0 {
+                     // Move the link: Remove from current tag, add to trash tag
+                     // Use existing filename as display name in trash
+                     let name = name_str.to_string(); 
+                     
+                     match repo.move_file_between_tags(file_id, tag_id, trash_id, &name) {
+                         Ok(_) => reply.ok(),
+                         Err(MagicError::State(_)) => reply.error(libc::ENOENT),
+                         Err(e) => {
+                             tracing::error!("[HollowDrive] Soft delete failed: {}", e);
+                             reply.error(libc::EIO);
+                         }
+                     }
+                } else {
+                     // Fallback if trash creation fails
+                     reply.error(libc::EIO);
                 }
             }
         } else {

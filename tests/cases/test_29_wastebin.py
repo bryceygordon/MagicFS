@@ -56,15 +56,26 @@ else:
     print("❌ FAILURE: Physical file deleted! (Hard Delete occurred)")
     sys.exit(1)
 
-# 7. Verify: Orphaned (Ready for Scavenger)
-# It should now have 0 tags.
-tags_count = test.run_sql_query(f"SELECT COUNT(*) FROM file_tags WHERE file_id = {file_id}")
-count = int(tags_count[0][0])
+# 7. Verify: MOVED TO TRASH (Phase 44 Logic)
+print("[Check] Verifying Soft Delete (Move to @trash)...")
 
-if count == 0:
-    print("✅ File is now an orphan (0 tags).")
+results = test.run_sql_query(f"""
+    SELECT t.name 
+    FROM file_tags ft 
+    JOIN tags t ON ft.tag_id = t.tag_id 
+    WHERE ft.file_id = {file_id}
+""")
+
+tags = [r[0] for r in results]
+print(f"   Current tags: {tags}")
+
+if "trash" in tags and len(tags) == 1:
+    print("✅ Success: File successfully moved to @trash.")
+elif len(tags) == 0:
+    print("❌ FAILURE: File was orphaned (Old behavior). Trash link missing.")
+    sys.exit(1)
 else:
-    print(f"❌ FAILURE: File still has {count} tags.")
+    print(f"❌ FAILURE: Unexpected state. Tags: {tags}")
     sys.exit(1)
 
 print("✅ TEST 29 PASSED")

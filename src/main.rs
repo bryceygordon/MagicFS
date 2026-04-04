@@ -55,8 +55,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- PHASE 17: SYSTEM-MANAGED INBOX ---
-    // Resolve system data directory for internal storage (inbox, etc.)
+    // --- PHASE 17 & 44: SYSTEM-MANAGED INBOX & OWNERSHIP FIX ---
+    
+    // 1. Capture Identity Early (for ownership enforcement)
+    let identity = magicfs::core::permissions::Identity::capture();
+
+    // 2. Resolve system data directory
     let system_data_dir = if let Ok(custom_dir) = env::var("MAGICFS_DATA_DIR") {
         PathBuf::from(custom_dir)
     } else {
@@ -66,14 +70,21 @@ async fn main() -> Result<()> {
             .join("magicfs")
     };
 
-    // Create system directories
+    // 3. Create system directories
     let system_inbox_dir = system_data_dir.join("inbox");
     std::fs::create_dir_all(&system_inbox_dir).map_err(|e| {
         tracing::error!("Failed to create system inbox directory: {}", e);
         e
     })?;
 
-    // Set restrictive permissions for privacy (0o700)
+    // 4. CRITICAL FIX: Enforce User Ownership on Inbox
+    // This allows the user's GUI/Shell to perform 'mv' (rename/unlink) operations
+    // even if the daemon created the directory as root.
+    if let Err(e) = identity.enforce_ownership(&system_inbox_dir) {
+        tracing::warn!("Failed to set inbox ownership: {}. 'Cut' operations might fail.", e);
+    }
+
+    // 5. Set restrictive permissions (700) - safe now that owner is correct
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
